@@ -1,270 +1,364 @@
-# practiceRabbitMQ
-
-Учебный Go-сервис событий заказов с PostgreSQL и RabbitMQ. Этот README описывает устройство тестов, отдельное тестовое окружение, запуск проверок и получение покрытия.
-
-Все команды ниже выполняются **из корня проекта**, где находится `go.mod`. Примеры переменных окружения рассчитаны на Bash/Zsh.
-
-## Требования
-
-- Go версии из [go.mod](go.mod): сейчас `1.26.2`.
-- Docker с Docker Compose для тестов с настоящими PostgreSQL и RabbitMQ.
-- Для юнит-тестов достаточно Go: запускать контейнеры или HTTP-приложение не требуется.
-- Для команд с `-race` дополнительно нужны включённый CGO и доступный C-компилятор.
-
-## Какие тесты есть
-
-**Юнит-тесты** проверяют функции без настоящих PostgreSQL и RabbitMQ. Вместо внешних зависимостей используются fake-объекты: они возвращают заданные ответы и записывают вызовы, аргументы и сообщения.
-
-**Интеграционные тесты** работают с настоящими PostgreSQL или RabbitMQ. Они проверяют SQL-запросы, миграции, маршрутизацию сообщений и доставку в очередь ошибок.
-
-**Табличный тест** — способ описать несколько сценариев и выполнить их через `t.Run`. Табличными могут быть и юнит-тесты, и интеграционные тесты. Например, валидация события проверяется без БД, а разные фильтры и страницы списка событий — с PostgreSQL.
-
-| Файл | Что проверяет | Нужны сервисы |
-| --- | --- | --- |
-| [service_test.go](internal/service/service_test.go) | Валидацию, генерацию UUID, передачу аргументов и контекста, возврат данных и ошибок репозитория | Нет |
-| [handlers_test.go](internal/handler/handlers_test.go) | HTTP-статусы, JSON, заголовки, валидацию, фильтры и пагинацию; отсутствие вызовов репозитория при отклонении запроса | Нет |
-| [consumer_test.go](internal/broker/consumer_test.go) | Обработку сообщения, ошибки, границы числа попыток, параметры Ack/Nack и завершение обработчика | Нет |
-| [publisher_test.go](internal/broker/publisher_test.go) | Полное содержимое сообщений, несколько публикаций, ошибку посередине, срабатывания таймера и отмену | Нет |
-| [rabbitmq_test.go](internal/broker/rabbitmq_test.go) | Повторные подключения, задержки между попытками, закрытие ресурсов и отмену через fake-объекты | Нет |
-| [repository_test.go](internal/repository/repository_test.go) | Конструктор репозитория и ошибку сериализации payload до обращения к БД | Нет |
-| [repository_integration_test.go](internal/repository/repository_integration_test.go) | Запись и чтение событий, фильтры, порядок, пагинацию, смену статусов и счётчики повторов | PostgreSQL |
-| [rabbitmq_integration_test.go](internal/broker/rabbitmq_integration_test.go) | Реальную доставку через exchange в очередь и перенаправление отклонённого сообщения в DLQ | RabbitMQ и management API |
-
-Общие fake-объекты тестов брокера находятся в [test_helpers_test.go](internal/broker/test_helpers_test.go). Тестовые типы другого пакета, например из `internal/service/service_test.go`, не становятся доступны пакету `broker`.
-
-Случайный выбор ошибки consumer в тестах управляется явно. Тесты publisher подают сигналы времени и ожидают завершения горутины, поэтому им не нужно ждать рабочего интервала публикации в 30 секунд.
-
-## Обычное и тестовое окружения
-
-Для них используются разные Compose-файлы и порты:
-
-| Параметр | Окружение приложения | Тестовое окружение |
-| --- | --- | --- |
-| Compose-файл | [docker-compose.yml](docker-compose/docker-compose.yml) | [docker-compose.test.yml](docker-compose/docker-compose.test.yml) |
-| База PostgreSQL | `notifications` | `notifications_test` |
-| PostgreSQL на хосте | `localhost:5434` | `localhost:15434` |
-| Пользователь / пароль PostgreSQL | `app / app` | `app / app` |
-| RabbitMQ AMQP на хосте | `localhost:5672` | `localhost:15673` |
-| RabbitMQ management | `http://localhost:15672` | `http://localhost:15674` |
-| Пользователь / пароль RabbitMQ | `guest / guest` | `guest / guest` |
-| Хранение PostgreSQL | Именованный volume `postgres_data` | Временное хранилище `tmpfs` |
-
-Тестовый Compose-проект называется `notifications-tests`. Он создаёт отдельные контейнеры; его порты доступны через `127.0.0.1`. Данные тестовых PostgreSQL и RabbitMQ хранятся в `tmpfs` и теряются при остановке контейнеров.
-
-Приложение читает `DATABASE_URL` и `RABBITMQ_URL`. Интеграционные тесты читают отдельные переменные `TEST_DATABASE_URL`, `TEST_RABBITMQ_URL` и `TEST_RABBITMQ_MANAGEMENT_URL`. Указанные ниже тестовые URL ведут в тестовые контейнеры и не используют основную базу `notifications`.
-
-### Где находятся тестовые данные PostgreSQL
-
-Базу `notifications_test` создаёт контейнер PostgreSQL через настройку `POSTGRES_DB`. Сам тестовый helper подключается к **уже существующей базе** и выполняет следующие действия:
-
-1. Создаёт схему с уникальным именем `test_repository_<uuid>`.
-2. Настраивает `search_path` соединений на эту схему.
-3. Применяет SQL-файлы из [migrations](migrations) по порядку имён.
-4. Создаёт события, необходимые конкретному тесту.
-5. Через `t.Cleanup` закрывает пул соединений и удаляет свою схему вместе с таблицами и данными.
-
-Поэтому таблица теста находится, например, в `test_repository_<uuid>.events`, а не в `public.events`. После завершения тестов эти временные схемы обычно уже удалены. Независимые тесты и запуски не очищают таблицы друг друга: общий `TRUNCATE events` не используется.
-
-Для своей тестовой инфраструктуры нужно заранее создать базу и дать тестовому пользователю право создавать схемы. Обычные ошибки и `t.Fatal` запускают cleanup; принудительное завершение процесса может оставить временные схемы. В поставляемом тестовом окружении остановка контейнера также удаляет временные данные.
-
-### Где находятся тестовые очереди RabbitMQ
-
-Для каждого RabbitMQ-интеграционного теста helper создаёт vhost `practice-rabbitmq-test-<uuid>` через management API. Vhost — отдельное пространство очередей и exchange внутри RabbitMQ.
-
-В нём проверяется маршрут:
-
-```text
+practiceRabbitMQ
+Учебный Go-микросервис обработки событий заказов с PostgreSQL и RabbitMQ.
+Сервис принимает события заказа по HTTP, сохраняет их в PostgreSQL со статусом pending, периодически публикует ожидающие события в RabbitMQ и обрабатывает их consumer'ом. При успешной обработке событие становится sent. Ошибки увеличивают retry_count, неуспешные сообщения попадают в DLQ, а события со статусом failed можно повторно поставить в обработку через admin endpoint.
+Все команды ниже выполняются из корня проекта, где находится go.mod.
+Основной поток события
+POST /api/events
+      |
+      v
+   Handler
+      |
+      v
+   Service
+      |
+      v
+ PostgreSQL
+ status=pending
+      |
+      | publisher
+      v
 orders.exchange
-  → notifications.queue
-  → Nack с requeue=false
-  → notifications.dlx
-  → notifications.dlq
-```
+      |
+      v
+notifications.queue
+      |
+      v
+   Consumer
+    /     \
+ success   error
+   |        |
+   v        v
+ status    retry_count + 1
+ =sent     Nack(requeue=false)
+            |
+            v
+      notifications.dlx
+            |
+            v
+      notifications.dlq
+Publisher периодически выбирает до 10 событий со статусом pending и публикует их в RabbitMQ. Consumer имитирует отправку уведомления; часть обработок завершается ошибкой для проверки retry/DLQ-сценария.
+Архитектура
+practiceRabbitMQ/
+├── cmd/
+│   └── api/
+│       └── main.go
+├── internal/
+│   ├── config/
+│   ├── domain/
+│   ├── handler/
+│   ├── service/
+│   ├── repository/
+│   └── broker/
+├── migrations/
+├── docs/
+├── docker-compose/
+│   ├── docker-compose.yml
+│   └── docker-compose.test.yml
+├── go.mod
+├── go.sum
+└── README.md
+Роли пакетов:
+- cmd/api — сборка приложения и запуск HTTP-сервера, PostgreSQL и RabbitMQ.
+- internal/config — чтение конфигурации из переменных окружения.
+- internal/domain — модели событий и ответы API.
+- internal/handler — HTTP-обработчики.
+- internal/service — бизнес-логика.
+- internal/repository — SQL и работа с PostgreSQL.
+- internal/broker — publisher, consumer, RabbitMQ, reconnect/backoff.
+- migrations — миграции PostgreSQL.
+- docs — сгенерированная Swagger-документация.
+Требования
+- Go версии из go.mod.
+- Docker с Docker Compose.
+- PostgreSQL и RabbitMQ для запуска приложения.
+- Для unit-тестов достаточно Go.
+- Для команд с -race нужны включённый CGO и доступный C-компилятор.
+Быстрый запуск приложения
+Поднять PostgreSQL и RabbitMQ:
+docker compose -f docker-compose/docker-compose.yml up -d
+Проверить контейнеры:
+docker ps
+В обычном окружении используются:
+PostgreSQL:          localhost:5434
+RabbitMQ AMQP:       localhost:5672
+RabbitMQ Management: http://localhost:15672
+Запустить приложение:
+go run ./cmd/api
+При успешном старте в логах должны появиться сообщения о подключении к PostgreSQL и RabbitMQ и запуске HTTP-сервера на :8080.
+Остановить приложение можно через Ctrl+C. Сервер и RabbitMQ manager завершаются через graceful shutdown.
+HTTP API
+POST /api/events
+Регистрирует новое событие заказа.
+curl -X POST http://localhost:8080/api/events \
+  -H "Content-Type: application/json" \
+  -d '{
+    "user_id": "123",
+    "order_id": "order-100",
+    "event_type": "paid",
+    "payload": {
+      "amount": 2500
+    }
+  }'
+Допустимые event_type:
+created
+paid
+shipped
+Успешный ответ:
+{
+  "event_id": "uuid",
+  "status": "queued"
+}
+Событие при этом сохраняется в PostgreSQL со статусом pending.
+GET /api/events
+Поддерживаются фильтры и пагинация:
+status
+user_id
+limit
+offset
+curl "http://localhost:8080/api/events?user_id=123&status=sent&limit=10&offset=0"
+GET /api/events/{event_id}
+curl http://localhost:8080/api/events/708b8a2f-222a-40da-850d-4ae5eff1324a
+Если событие отсутствует, API возвращает 404.
+POST /api/admin/retry-pending
+Повторно ставит события со статусом failed в обработку.
+curl -X POST http://localhost:8080/api/admin/retry-pending
+Пример ответа:
+{
+  "retried": 1
+}
+При повторной постановке событие возвращается в pending, retry_count сбрасывается, а error_message очищается.
+Статусы события
+pending
+  |
+  | успешная обработка
+  v
+ sent
+При ошибке consumer увеличивает retry_count. Неуспешная доставка сообщения отправляется через DLX в notifications.dlq.
+После достижения лимита повторных ошибок событие переводится в failed. Его можно вернуть в обработку через POST /api/admin/retry-pending.
+RabbitMQ
+При старте приложения создаются:
+orders.exchange
+notifications.queue
+notifications.dlx
+notifications.dlq
+Основной маршрут:
+orders.exchange
+  -> notifications.queue
+Ошибка consumer:
+notifications.queue
+  -> Nack(requeue=false)
+  -> notifications.dlx
+  -> notifications.dlq
+Проверить очереди:
+docker exec notifications-rabbitmq \
+  rabbitmqctl list_queues name messages_ready messages_unacknowledged
+Проверка данных PostgreSQL
+docker exec -it notifications-postgres \
+  psql -U app -d notifications
+SELECT event_id, user_id, order_id, event_type, status, retry_count
+FROM events
+ORDER BY created_at DESC
+LIMIT 10;
+Выйти:
+\q
+Swagger
+После запуска приложения Swagger UI доступен по адресу:
+http://localhost:8080/swagger/
+После изменения API документацию можно пересоздать:
+swag init \
+  -g main.go \
+  -d cmd/api,internal/handler,internal/domain \
+  --parseInternal \
+  -o docs
+Тестирование
+Какие тесты есть
+Unit-тесты проверяют функции без настоящих PostgreSQL и RabbitMQ. Вместо внешних зависимостей используются fake-объекты.
+Интеграционные тесты работают с настоящими PostgreSQL или RabbitMQ и проверяют SQL, миграции, маршрутизацию сообщений и DLQ.
+Табличный тест описывает несколько сценариев и выполняет их через t.Run.
+Файл	Что проверяет	Нужны сервисы
+internal/service/service_test.go	Валидацию, UUID, передачу аргументов и ошибки репозитория	Нет
+internal/handler/handlers_test.go	HTTP-статусы, JSON, валидацию, фильтры и пагинацию	Нет
+internal/broker/consumer_test.go	Обработку сообщений, retry, Ack/Nack	Нет
+internal/broker/publisher_test.go	Публикацию, ошибки, timer и cancellation	Нет
+internal/broker/rabbitmq_test.go	Reconnect, backoff и закрытие ресурсов	Нет
+internal/repository/repository_test.go	Проверки repository без настоящей БД	Нет
+internal/repository/repository_integration_test.go	SQL, фильтры, пагинацию, статусы и retry_count	PostgreSQL
+internal/broker/rabbitmq_integration_test.go	Реальную маршрутизацию и DLQ	RabbitMQ + management API
 
-После проверки соединение закрывается, а тестовый vhost удаляется. Имена очередей совпадают с именами в приложении, но очереди находятся в отдельном vhost.
 
-Management API использует логин и пароль из `TEST_RABBITMQ_URL`. Пользователю нужны права доступа к management API, создания vhost и выдачи разрешений. Для конфигурации из репозитория используется `guest / guest`.
+Общие fake-объекты broker-тестов находятся в internal/broker/test_helpers_test.go.
+Обычное и тестовое окружения
+Параметр	Окружение приложения	Тестовое окружение
+Compose-файл	docker-compose/docker-compose.yml	docker-compose/docker-compose.test.yml
+База PostgreSQL	notifications	notifications_test
+PostgreSQL	localhost:5434	localhost:15434
+PostgreSQL user/password	app / app	app / app
+RabbitMQ AMQP	localhost:5672	localhost:15673
+RabbitMQ management	http://localhost:15672	http://localhost:15674
+RabbitMQ user/password	guest / guest	guest / guest
+PostgreSQL storage	postgres_data	tmpfs
 
-## Запуск юнит-тестов
 
-Все юнит-тесты с проверкой гонок данных:
-
-```sh
+Тестовый Compose-проект создаёт отдельные контейнеры. Интеграционные тесты используют TEST_DATABASE_URL, TEST_RABBITMQ_URL и TEST_RABBITMQ_MANAGEMENT_URL.
+Изоляция PostgreSQL integration tests
+Каждый integration test:
+1. создаёт схему вида test_repository_<uuid>;
+2. настраивает search_path;
+3. применяет миграции из migrations;
+4. создаёт необходимые данные;
+5. через t.Cleanup удаляет временную схему.
+Поэтому тесты не используют public.events и не мешают друг другу.
+Изоляция RabbitMQ integration tests
+Для каждого RabbitMQ integration test создаётся отдельный vhost:
+practice-rabbitmq-test-<uuid>
+Маршрут:
+orders.exchange
+  -> notifications.queue
+  -> Nack(requeue=false)
+  -> notifications.dlx
+  -> notifications.dlq
+После теста временный vhost удаляется.
+Запуск unit-тестов
+go test ./...
+Подробно:
+go test -v ./...
+С race detector:
 go test -race ./...
-```
-
-Без проверки гонок можно выполнить `go test ./...`.
-
-Один пакет или один именованный сценарий:
-
-```sh
+Один пакет:
 go test -v ./internal/service
+Один сценарий:
 go test -v ./internal/service -run '^TestValidateEvent/missing_user$'
-```
-
-Файлы интеграционных тестов начинаются с:
-
-```go
+Integration-файлы начинаются с:
 //go:build integration
-```
-
-Без тега `integration` Go не включает их в сборку тестов. Поэтому обычный запуск не требует БД и RabbitMQ.
-
-## Запуск всех тестов с интеграцией
-
-Поднять тестовые сервисы и дождаться готовности:
-
-```sh
-docker compose -f docker-compose/docker-compose.test.yml up --wait --wait-timeout 60
-```
-
-Запустить юнит-тесты и интеграционные тесты вместе:
-
-```sh
+Без -tags=integration они не запускаются.
+Запуск всех тестов с интеграцией
+docker compose -f docker-compose/docker-compose.test.yml \
+  up --wait --wait-timeout 60
 TEST_DATABASE_URL='postgres://app:app@localhost:15434/notifications_test?sslmode=disable' \
 TEST_RABBITMQ_URL='amqp://guest:guest@localhost:15673/' \
 TEST_RABBITMQ_MANAGEMENT_URL='http://localhost:15674' \
 go test -race -tags=integration ./... -count=1 -timeout=60s
-```
-
-`-tags=integration` добавляет интеграционные тесты к обычным; `-count=1` запускает проверки заново без использования закэшированного результата; `-timeout=60s` ограничивает время выполнения тестового пакета.
-
-Запускать само приложение через `go run` для этих проверок не нужно. Без обязательных `TEST_...` переменных соответствующие интеграционные тесты завершаются ошибкой настройки.
-
-## Проверить только репозиторий с PostgreSQL
-
-RabbitMQ для этой команды не требуется:
-
-```sh
-docker compose -f docker-compose/docker-compose.test.yml up --wait --wait-timeout 60 postgres
-
+Само приложение через go run для integration tests запускать не требуется.
+Только repository + PostgreSQL
+docker compose -f docker-compose/docker-compose.test.yml \
+  up --wait --wait-timeout 60 postgres
 TEST_DATABASE_URL='postgres://app:app@localhost:15434/notifications_test?sslmode=disable' \
 go test -v -tags=integration ./internal/repository -count=1 -timeout=60s
-```
-
-Для одного сценария добавь, например, `-run '^TestRepositoryGetEvents$'` к команде `go test`.
-
-## Проверить брокер с настоящим RabbitMQ
-
-PostgreSQL для этой команды не требуется: данные событий предоставляет fake-репозиторий.
-
-```sh
-docker compose -f docker-compose/docker-compose.test.yml up --wait --wait-timeout 60 rabbitmq
-
+Только broker + RabbitMQ
+docker compose -f docker-compose/docker-compose.test.yml \
+  up --wait --wait-timeout 60 rabbitmq
 TEST_RABBITMQ_URL='amqp://guest:guest@localhost:15673/' \
 TEST_RABBITMQ_MANAGEMENT_URL='http://localhost:15674' \
 go test -v -tags=integration ./internal/broker -count=1 -timeout=60s
-```
-
-## Покрытие кода
-
-Покрытие показывает, какие операторы кода выполнились во время конкретного запуска тестов. Процент не измеряет количество тестов или полноту проверок всех граничных случаев.
-
-### Почему у SQL-методов бывает 0%
-
-В обычных юнит-тестах репозитория выполняются только конструктор и ветка ошибки сериализации payload. Методы `GetEvents`, `GetEventByID`, `RetryFailedEvents`, `GetPendingEvents`, `MarkEventSent`, `IncrementRetryCount` и `MarkEventFailed` проверяются с настоящим PostgreSQL в интеграционном файле.
-
-Если собрать покрытие без `-tags=integration`, эти методы не исполнятся и получат `0.0%`. Юнит-тесты сервиса используют fake и не добавляют покрытие SQL-коду настоящего репозитория.
-
-### Покрытие только юнит-тестов
-
-```sh
+Покрытие кода
+Coverage показывает, какие statements выполнились во время конкретного запуска.
+Только unit-тесты
 go test ./... -count=1 -coverprofile=coverage-unit.out
 go tool cover -func=coverage-unit.out
 go tool cover -html=coverage-unit.out -o coverage-unit.html
-```
-
-Файл `coverage-unit.html` можно открыть в браузере: там видны выполненные и невыполненные участки.
-
-### Покрытие репозитория с PostgreSQL
-
-Этот вариант позволяет проверить именно методы, у которых в обычном отчёте были нули:
-
-```sh
-docker compose -f docker-compose/docker-compose.test.yml up --wait --wait-timeout 60 postgres
-
+Почему SQL-методы могут показывать 0%
+service-тесты используют fake repository и не выполняют настоящий SQL из internal/repository.
+Без integration tests методы вроде:
+GetEvents
+GetEventByID
+RetryFailedEvents
+GetPendingEvents
+MarkEventSent
+IncrementRetryCount
+MarkEventFailed
+могут показывать 0.0%.
+Это означает, что настоящий SQL-код не выполнялся в данном запуске, а не то, что тесты упали.
+Coverage repository с PostgreSQL
 TEST_DATABASE_URL='postgres://app:app@localhost:15434/notifications_test?sslmode=disable' \
-go test -tags=integration ./internal/repository -count=1 -timeout=60s -coverprofile=coverage-repository.out
+go test -tags=integration ./internal/repository \
+  -count=1 \
+  -timeout=60s \
+  -coverprofile=coverage-repository.out
 
 go tool cover -func=coverage-repository.out
 go tool cover -html=coverage-repository.out -o coverage-repository.html
-```
-
-### Общее покрытие с интеграционными тестами
-
-```sh
-docker compose -f docker-compose/docker-compose.test.yml up --wait --wait-timeout 60
-
+Общее coverage с integration tests
+docker compose -f docker-compose/docker-compose.test.yml \
+  up --wait --wait-timeout 60
 TEST_DATABASE_URL='postgres://app:app@localhost:15434/notifications_test?sslmode=disable' \
 TEST_RABBITMQ_URL='amqp://guest:guest@localhost:15673/' \
 TEST_RABBITMQ_MANAGEMENT_URL='http://localhost:15674' \
-go test -race -tags=integration ./... -count=1 -timeout=60s -covermode=atomic -coverprofile=coverage-all.out
+go test -race -tags=integration ./... \
+  -count=1 \
+  -timeout=60s \
+  -covermode=atomic \
+  -coverprofile=coverage-all.out
 
 go tool cover -func=coverage-all.out
 go tool cover -html=coverage-all.out -o coverage-all.html
-```
+После изменения кода или тестов coverage profile нужно создавать заново.
+Переменные окружения тестового окружения
+Переменная	Кто читает	Значение
+TEST_DATABASE_URL	repository integration tests	postgres://app:app@localhost:15434/notifications_test?sslmode=disable
+TEST_RABBITMQ_URL	RabbitMQ integration tests	amqp://guest:guest@localhost:15673/
+TEST_RABBITMQ_MANAGEMENT_URL	RabbitMQ integration tests	http://localhost:15674
+TEST_POSTGRES_PORT	Docker Compose	15434
+TEST_RABBITMQ_PORT	Docker Compose	15673
+TEST_RABBITMQ_MANAGEMENT_PORT	Docker Compose	15674
 
-`coverage-all.out` содержит результаты одного общего запуска юнит-тестов и интеграционных тестов. Все файлы отчётов в этих примерах создаются в корне проекта.
 
-`go tool cover` читает готовый профиль и не запускает тесты заново. После изменения кода или набора тестов профиль нужно пересоздать. Старый `docker-compose/coverage.out` содержит пути до разнесения кода по `internal/` и не отражает текущее состояние проекта.
-
-## Переменные окружения и другие порты
-
-| Переменная | Кто читает | Значение для тестового Compose по умолчанию |
-| --- | --- | --- |
-| `TEST_DATABASE_URL` | Тесты репозитория | `postgres://app:app@localhost:15434/notifications_test?sslmode=disable` |
-| `TEST_RABBITMQ_URL` | Тесты RabbitMQ | `amqp://guest:guest@localhost:15673/` |
-| `TEST_RABBITMQ_MANAGEMENT_URL` | Тесты RabbitMQ | `http://localhost:15674` |
-| `TEST_POSTGRES_PORT` | Docker Compose | `15434` |
-| `TEST_RABBITMQ_PORT` | Docker Compose | `15673` |
-| `TEST_RABBITMQ_MANAGEMENT_PORT` | Docker Compose | `15674` |
-
-Для трёх URL в тестовом коде нет значения по умолчанию: их нужно передать явно. Переменные портов влияют на Docker Compose; они не формируют URL для `go test` автоматически.
-
-Например, если порт `15434` занят, можно запустить тестовый PostgreSQL на `15435`:
-
-```sh
-TEST_POSTGRES_PORT=15435 docker compose -f docker-compose/docker-compose.test.yml up --wait postgres
-
-TEST_DATABASE_URL='postgres://app:app@localhost:15435/notifications_test?sslmode=disable' \
-go test -tags=integration ./internal/repository -count=1 -timeout=60s
-```
-
-## Статус, логи и очистка окружения
-
-Проверить контейнеры и последние сообщения сервисов:
-
-```sh
+Статус, логи и очистка test environment
 docker compose -f docker-compose/docker-compose.test.yml ps
-docker compose -f docker-compose/docker-compose.test.yml logs --tail=100 postgres rabbitmq
-```
-
-После проверок остановить и удалить тестовые контейнеры и сеть:
-
-```sh
+docker compose -f docker-compose/docker-compose.test.yml \
+  logs --tail=100 postgres rabbitmq
 docker compose -f docker-compose/docker-compose.test.yml down
-```
+Эта команда не удаляет основные контейнеры приложения и основной PostgreSQL volume.
+Troubleshooting
+Симптом	Что проверить
+0.0% у repository SQL-методов	Запустить integration tests с -tags=integration
+set TEST_DATABASE_URL...	Передать TEST_DATABASE_URL
+set TEST_RABBITMQ_URL and TEST_RABBITMQ_MANAGEMENT_URL...	Передать обе RabbitMQ test-переменные
+connection refused	Проверить контейнеры, порт и URL
+database "notifications_test" does not exist	Проверить test Compose и TEST_DATABASE_URL
+Порт занят	Изменить Compose port variable и соответствующий test URL
+undefined: FakeRepository	Проверить актуальность test-файлов и package
+VS Code показывает старый файл	Закрыть старую вкладку без сохранения либо выполнить Developer: Reload Window; при конфликте сначала использовать Compare
 
-Эта команда относится к проекту `notifications-tests`. Основные контейнеры из `docker-compose.yml` и их PostgreSQL volume она не удаляет. При следующем запуске тестового Compose создаётся чистое временное окружение.
 
-## Если проверка не проходит
-
-| Симптом | Что проверить |
-| --- | --- |
-| `0.0%` у методов репозитория | Собрать новый профиль с `-tags=integration` и запущенным тестовым PostgreSQL |
-| `set TEST_DATABASE_URL...` | Передать URL в той же команде `go test` или экспортировать его в текущем терминале |
-| `set TEST_RABBITMQ_URL and TEST_RABBITMQ_MANAGEMENT_URL...` | Передать обе переменные для тестов брокера |
-| `connection refused` | Проверить готовность контейнеров через `ps`, логи и совпадение порта в URL с Compose |
-| `database "notifications_test" does not exist` | Убедиться, что URL указывает на тестовый контейнер; для своего сервера создать БД заранее |
-| Ошибка создания схемы или HTTP 401/403 от management API | Проверить тестовые учётные данные и права создания схемы или vhost |
-| Порт уже занят | Использовать переменные портов Compose и обновить соответствующий тестовый URL |
-| `undefined: FakeRepository` после обновления файлов | Проверить, что загружены актуальные тесты: в них используется `fakeRepository` из своего пакета |
-| Редактор показывает старые тесты | Сравнить полный путь файла с открытым проектом; при конфликте загрузить версию с диска, предварительно сохранив свои несохранённые правки отдельно |
-
-## Swagger
-
-После изменения API пакет [docs](docs) можно пересоздать из аннотаций обработчиков. Команда для `swag` версии `v1.16.4`, указанной в `go.mod`:
-
-```sh
-swag init -g main.go -d cmd/api,internal/handler,internal/domain --parseInternal --outputTypes go
-```
+Ручная end-to-end проверка
+Создать событие:
+curl -X POST http://localhost:8080/api/events \
+  -H "Content-Type: application/json" \
+  -d '{
+    "user_id": "123",
+    "order_id": "e2e-test",
+    "event_type": "paid",
+    "payload": {"amount": 2500}
+  }'
+В логах приложения ожидается:
+published event: <event_id>
+consumer received: <event_id>
+event sent: <event_id>
+Проверить результат:
+docker exec -it notifications-postgres \
+  psql -U app -d notifications \
+  -c "SELECT event_id, order_id, status, retry_count
+      FROM events
+      WHERE order_id='e2e-test';"
+После успешной обработки:
+status = sent
+retry_count = 0
+Проверить DLQ:
+docker exec notifications-rabbitmq \
+  rabbitmqctl list_queues name messages_ready messages_unacknowledged
+Что уже проверено
+В текущей реализации вручную и тестами проверены:
+- создание события через HTTP;
+- сохранение pending в PostgreSQL;
+- публикация в RabbitMQ;
+- получение сообщения consumer'ом;
+- переход pending -> sent;
+- увеличение retry_count после simulated error;
+- повторная публикация pending;
+- попадание неуспешной доставки в notifications.dlq;
+- admin retry для failed;
+- сброс retry-данных при повторной постановке;
+- повторный переход в sent;
+- graceful shutdown;
+- RabbitMQ reconnect/backoff;
+- unit- и integration-тесты.
