@@ -16,6 +16,7 @@ CREATE TABLE events (
     retry_count INTEGER NOT NULL DEFAULT 0,
 
     error_message TEXT,
+    correlation_id TEXT,
 
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 

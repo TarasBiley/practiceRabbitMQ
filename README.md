@@ -112,6 +112,13 @@ RabbitMQ AMQP:       localhost:5672
 RabbitMQ Management: http://localhost:15672
 ```
 
+Перед первым запуском применить миграцию к пустой базе:
+
+```sh
+docker exec -i notifications-postgres \
+  psql -U app -d notifications < migrations/001_init.sql
+```
+
 Запустить приложение:
 
 ```sh

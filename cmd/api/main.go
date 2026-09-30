@@ -28,6 +28,13 @@ import (
 // @host localhost:8080
 // @BasePath /
 func main() {
+	if err := run(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}
+
+func run() error {
 	ctx, stop := signal.NotifyContext(
 		context.Background(),
 		os.Interrupt,
@@ -43,15 +50,13 @@ func main() {
 	)
 
 	if err != nil {
-		fmt.Println("database connection error:", err)
-		return
+		return fmt.Errorf("database connection error: %w", err)
 	}
 
 	defer pool.Close()
 
 	if err := pool.Ping(context.Background()); err != nil {
-		fmt.Println("database ping error:", err)
-		return
+		return fmt.Errorf("database ping error: %w", err)
 	}
 
 	fmt.Println("connected to PostgreSQL")
@@ -106,17 +111,24 @@ func main() {
 		Addr: config.HTTPAddr,
 	}
 
+	serverErrors := make(chan error, 1)
 	go func() {
 		fmt.Println("server started on", config.HTTPAddr)
 
 		err := server.ListenAndServe()
 
-		if err != nil && err != http.ErrServerClosed {
-			fmt.Println("server error:", err)
+		if err == http.ErrServerClosed {
+			err = nil
 		}
+		serverErrors <- err
 	}()
 
-	<-ctx.Done()
+	var serverErr error
+	select {
+	case serverErr = <-serverErrors:
+	case <-ctx.Done():
+	}
+	stop()
 
 	fmt.Println("shutting down application...")
 	shutdownCtx, cancel := context.WithTimeout(
@@ -134,4 +146,8 @@ func main() {
 	wg.Wait()
 
 	fmt.Println("RabbitMQ stopped")
+	if serverErr != nil {
+		return fmt.Errorf("server error: %w", serverErr)
+	}
+	return nil
 }

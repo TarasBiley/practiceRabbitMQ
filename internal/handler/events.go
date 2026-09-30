@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	models "practiceRabbitMQ/internal/domain"
 	"practiceRabbitMQ/internal/service"
@@ -35,9 +36,16 @@ func CreateEventHandler(repo service.EventRepository, w http.ResponseWriter, r *
 	var event models.EventRequest
 
 	// Decode the JSON request body into the EventRequest struct
-	err := json.NewDecoder(r.Body).Decode(&event)
+	decoder := json.NewDecoder(r.Body)
+	err := decoder.Decode(&event)
 	if err != nil {
-		http.Error(w, "Invalid request payload", http.StatusBadRequest)
+		writeBadRequest(w, "Invalid request payload")
+		return
+	}
+
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		writeBadRequest(w, "Invalid request payload")
 		return
 	}
 
@@ -117,7 +125,7 @@ func GetEventsHandler(
 	if limitStr != "" {
 		value, err := strconv.Atoi(limitStr)
 		if err != nil || value <= 0 {
-			http.Error(w, "invalid limit", http.StatusBadRequest)
+			writeBadRequest(w, "invalid limit")
 			return
 		}
 
@@ -127,7 +135,7 @@ func GetEventsHandler(
 	if offsetStr != "" {
 		value, err := strconv.Atoi(offsetStr)
 		if err != nil || value < 0 {
-			http.Error(w, "invalid offset", http.StatusBadRequest)
+			writeBadRequest(w, "invalid offset")
 			return
 		}
 
@@ -143,7 +151,7 @@ func GetEventsHandler(
 		status != "sent" &&
 		status != "failed" {
 
-		http.Error(w, "invalid status", http.StatusBadRequest)
+		writeBadRequest(w, "invalid status")
 		return
 	}
 
@@ -179,7 +187,7 @@ func GetEventsHandler(
 // @Tags events
 // @Produce json
 // @Param event_id path string true "UUID события"
-// @Success 200 {object} domain.CreateEventResponse
+// @Success 200 {object} domain.EventResponse
 // @Failure 400 {string} string
 // @Failure 404 {string} string
 // @Failure 500 {string} string
@@ -219,39 +227,16 @@ func GetEventByIDHandler(
 
 }
 
-// retryPendingHandler godoc
-// @Summary Повторно поставить failed события в очередь
-// @Description Переводит события со статусом failed обратно в pending и сбрасывает retry_count
-// @Tags admin
-// @Produce json
-// @Success 200 {object} map[string]int64
-// @Failure 405 {string} string
-// @Failure 500 {string} string
-// @Router /api/admin/retry-pending [post]
-func RetryPendingHandler(
-	repo service.EventRetryer,
-	w http.ResponseWriter,
-	r *http.Request,
-) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	count, err := service.RetryFailedEventsService(r.Context(), repo)
-	if err != nil {
-		http.Error(w, "failed to retry events", http.StatusInternalServerError)
-		return
-	}
-	response := map[string]int64{
-		"retried": count,
+func writeBadRequest(w http.ResponseWriter, message string) {
+	response := models.ErrorResponse{
+		Error: models.ErrorDetail{
+			Code:    "BAD_REQUEST",
+			Message: message,
+			Fields:  map[string]string{},
+		},
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-
-	err = json.NewEncoder(w).Encode(response)
-	if err != nil {
-		fmt.Println("failed to encode response:", err)
-	}
-
+	w.WriteHeader(http.StatusBadRequest)
+	json.NewEncoder(w).Encode(response)
 }

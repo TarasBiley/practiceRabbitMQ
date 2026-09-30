@@ -86,6 +86,21 @@ func decodeResponse[T any](t *testing.T, rec *httptest.ResponseRecorder) T {
 	return response
 }
 
+func assertBadRequestJSON(t *testing.T, rec *httptest.ResponseRecorder, message string) {
+	t.Helper()
+	got := decodeResponse[map[string]any](t, rec)
+	want := map[string]any{
+		"error": map[string]any{
+			"code":    "BAD_REQUEST",
+			"message": message,
+			"fields":  map[string]any{},
+		},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("bad request response = %#v, want %#v", got, want)
+	}
+}
+
 func TestCreateEventHandler(t *testing.T) {
 	const validBody = `{"user_id":"user-17","order_id":"order-42","event_type":"paid","payload":{"amount":42,"currency":"RUB"}}`
 	wantEvent := models.EventRequest{
@@ -104,6 +119,10 @@ func TestCreateEventHandler(t *testing.T) {
 		wantCalls  int
 	}{
 		{name: "success", method: http.MethodPost, body: validBody, wantCode: http.StatusCreated, wantCalls: 1},
+		{name: "trailing JSON whitespace", method: http.MethodPost, body: validBody + " \t\r\n", wantCode: http.StatusCreated, wantCalls: 1},
+		{name: "trailing garbage", method: http.MethodPost, body: validBody + " garbage", wantCode: http.StatusBadRequest, wantText: "Invalid request payload", wantCalls: 0},
+		{name: "second JSON object", method: http.MethodPost, body: validBody + ` {"x":1}`, wantCode: http.StatusBadRequest, wantText: "Invalid request payload", wantCalls: 0},
+		{name: "second JSON null", method: http.MethodPost, body: validBody + " null", wantCode: http.StatusBadRequest, wantText: "Invalid request payload", wantCalls: 0},
 		{name: "wrong method", method: http.MethodGet, body: validBody, wantCode: http.StatusMethodNotAllowed, wantText: "Method not allowed"},
 		{name: "empty body", method: http.MethodPost, wantCode: http.StatusBadRequest, wantText: "Invalid request payload"},
 		{name: "malformed JSON", method: http.MethodPost, body: `{"user_id":`, wantCode: http.StatusBadRequest, wantText: "Invalid request payload"},
@@ -168,10 +187,17 @@ func TestCreateEventHandler(t *testing.T) {
 			CreateEventHandler(repo, rec, req)
 
 			contentType := "text/plain; charset=utf-8"
-			if tt.wantCode == http.StatusCreated || tt.wantFields != nil {
+			wantText := tt.wantText
+			if tt.wantCode == http.StatusCreated || tt.wantCode == http.StatusBadRequest {
 				contentType = "application/json"
 			}
-			assertHTTPResponse(t, rec, tt.wantCode, contentType, tt.wantText)
+			if tt.wantCode == http.StatusBadRequest {
+				wantText = ""
+				if tt.wantFields == nil {
+					assertBadRequestJSON(t, rec, tt.wantText)
+				}
+			}
+			assertHTTPResponse(t, rec, tt.wantCode, contentType, wantText)
 			if repo.calls != tt.wantCalls {
 				t.Errorf("repository calls = %d, want %d", repo.calls, tt.wantCalls)
 			}
@@ -271,10 +297,15 @@ func TestGetEventsHandler(t *testing.T) {
 			GetEventsHandler(repo, rec, req)
 
 			contentType := "text/plain; charset=utf-8"
-			if tt.wantCode == http.StatusOK {
+			wantText := tt.wantText
+			if tt.wantCode == http.StatusOK || tt.wantCode == http.StatusBadRequest {
 				contentType = "application/json"
 			}
-			assertHTTPResponse(t, rec, tt.wantCode, contentType, tt.wantText)
+			if tt.wantCode == http.StatusBadRequest {
+				wantText = ""
+				assertBadRequestJSON(t, rec, tt.wantText)
+			}
+			assertHTTPResponse(t, rec, tt.wantCode, contentType, wantText)
 			if repo.calls != tt.wantCalls {
 				t.Errorf("repository calls = %d, want %d", repo.calls, tt.wantCalls)
 			}

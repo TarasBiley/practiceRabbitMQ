@@ -1,2 +1,0 @@
-ALTER TABLE events
-ADD COLUMN IF NOT EXISTS correlation_id TEXT;
