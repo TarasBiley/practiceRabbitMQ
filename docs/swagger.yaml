@@ -1,0 +1,195 @@
+basePath: /
+definitions:
+  domain.CreateEventResponse:
+    properties:
+      event_id:
+        type: string
+      status:
+        type: string
+    type: object
+  domain.ErrorDetail:
+    properties:
+      code:
+        type: string
+      fields:
+        additionalProperties:
+          type: string
+        type: object
+      message:
+        type: string
+    type: object
+  domain.ErrorResponse:
+    properties:
+      error:
+        $ref: '#/definitions/domain.ErrorDetail'
+    type: object
+  domain.EventRequest:
+    properties:
+      event_type:
+        type: string
+      order_id:
+        type: string
+      payload:
+        additionalProperties: {}
+        type: object
+      user_id:
+        type: string
+    type: object
+  domain.EventResponse:
+    properties:
+      created_at:
+        type: string
+      error_message:
+        type: string
+      event_id:
+        type: string
+      event_type:
+        type: string
+      order_id:
+        type: string
+      payload:
+        type: object
+      retry_count:
+        type: integer
+      status:
+        type: string
+      updated_at:
+        type: string
+      user_id:
+        type: string
+    type: object
+host: localhost:8080
+info:
+  contact: {}
+  description: API микросервиса уведомлений интернет-магазина.
+  title: Notifications API
+  version: "1.0"
+paths:
+  /api/admin/retry-pending:
+    post:
+      description: Переводит события со статусом failed обратно в pending и сбрасывает
+        retry_count
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties:
+              format: int64
+              type: integer
+            type: object
+        "405":
+          description: Method Not Allowed
+          schema:
+            type: string
+        "500":
+          description: Internal Server Error
+          schema:
+            type: string
+      summary: Повторно поставить failed события в очередь
+      tags:
+      - admin
+  /api/events:
+    get:
+      description: Возвращает список событий с фильтрацией и пагинацией
+      parameters:
+      - description: 'Фильтр по статусу: pending, sent, failed'
+        in: query
+        name: status
+        type: string
+      - description: Фильтр по user_id
+        in: query
+        name: user_id
+        type: string
+      - default: 10
+        description: Количество событий
+        in: query
+        name: limit
+        type: integer
+      - default: 0
+        description: Смещение
+        in: query
+        name: offset
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              $ref: '#/definitions/domain.EventResponse'
+            type: array
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/domain.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            type: string
+      summary: Получить список событий
+      tags:
+      - events
+    post:
+      consumes:
+      - application/json
+      description: Создаёт новое событие уведомления и ставит его в очередь на обработку
+      parameters:
+      - description: Данные события
+        in: body
+        name: event
+        required: true
+        schema:
+          $ref: '#/definitions/domain.EventRequest'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            $ref: '#/definitions/domain.CreateEventResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/domain.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            type: string
+      summary: Создать событие заказа
+      tags:
+      - events
+  /api/events/{event_id}:
+    get:
+      description: Возвращает одно событие по UUID
+      parameters:
+      - description: UUID события
+        in: path
+        name: event_id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/domain.EventResponse'
+        "400":
+          description: Bad Request
+          schema:
+            type: string
+        "404":
+          description: Not Found
+          schema:
+            type: string
+        "500":
+          description: Internal Server Error
+          schema:
+            type: string
+      summary: Получить событие по ID
+      tags:
+      - events
+swagger: "2.0"
