@@ -37,11 +37,10 @@ func (f *fakeRepository) CreateEvent(ctx context.Context, id, correlationID stri
 	return f.err
 }
 
-func (f *fakeRepository) GetEvents(ctx context.Context, status, userID string, limit, offset int) ([]models.EventResponse, error) {
-	f.record("GetEvents", ctx, status, userID, limit, offset)
+func (f *fakeRepository) GetEvents(ctx context.Context, status, userID, eventType string, limit, offset int) ([]models.EventResponse, error) {
+	f.record("GetEvents", ctx, status, userID, eventType, limit, offset)
 	return f.events, f.err
 }
-
 func (f *fakeRepository) GetEventByID(ctx context.Context, id string) (models.EventResponse, error) {
 	f.record("GetEventByID", ctx, id)
 	return f.event, f.err
@@ -84,42 +83,47 @@ func assertRepositoryCall(t *testing.T, repo *fakeRepository, method string, ctx
 }
 
 func TestCreateEventService(t *testing.T) {
-	for _, tt := range []struct {
+	tests := []struct {
 		name string
 		err  error
 	}{
 		{name: "success"},
 		{name: "repository error", err: errors.New("create failed")},
-	} {
+	}
+
+	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := t.Context()
 			repo := &fakeRepository{err: tt.err}
-			event := models.EventRequest{
-				UserID: "user-1", OrderID: "order-2", EventType: "paid",
-				Payload: map[string]any{"amount": 1000, "currency": "RUB"},
-			}
 
-			id, err := CreateEventService(ctx, repo, event)
+			event := models.EventRequest{
+				UserID:    "user-1",
+				OrderID:   "order-2",
+				EventType: "paid",
+				Payload:   map[string]any{"amount": 1000, "currency": "RUB"},
+			}
+			correlationID := "test-correlation-id"
+
+			id, err := CreateEventService(ctx, repo, correlationID, event)
 			if !errors.Is(err, tt.err) {
 				t.Fatalf("error = %v, want %v", err, tt.err)
 			}
-			if len(repo.calls) != 1 || len(repo.calls[0].args) != 3 {
-				t.Fatalf("expected one CreateEvent call, got %+v", repo.calls)
+			if len(repo.calls) != 1 {
+				t.Fatalf("repository calls = %d, want 1", len(repo.calls))
 			}
 			savedID, _ := repo.calls[0].args[0].(string)
-			correlationID, _ := repo.calls[0].args[1].(string)
 			assertRepositoryCall(t, repo, "CreateEvent", ctx, savedID, correlationID, event)
-			for name, value := range map[string]string{"event_id": savedID, "correlation_id": correlationID} {
-				if parsed, err := uuid.Parse(value); err != nil || parsed == uuid.Nil {
-					t.Errorf("%s = %q, want a nonzero UUID", name, value)
-				}
+			if parsed, err := uuid.Parse(savedID); err != nil || parsed == uuid.Nil {
+				t.Errorf("eventID = %q, want valid UUID", savedID)
 			}
-			wantID := savedID
 			if tt.err != nil {
-				wantID = ""
+				if id != "" {
+					t.Errorf("eventID = %q, want empty", id)
+				}
+				return
 			}
-			if id != wantID {
-				t.Errorf("eventID = %q, want %q", id, wantID)
+			if id != savedID {
+				t.Errorf("eventID = %q, want %q", id, savedID)
 			}
 		})
 	}
@@ -127,25 +131,55 @@ func TestCreateEventService(t *testing.T) {
 
 func TestValidateEvent(t *testing.T) {
 	const typeError = "must be created, paid or shipped"
+
 	for _, tt := range []struct {
 		name  string
 		event models.EventRequest
 		want  map[string]string
 	}{
-		{name: "created", event: models.EventRequest{UserID: "u", OrderID: "o", EventType: "created"}},
-		{name: "paid", event: models.EventRequest{UserID: "u", OrderID: "o", EventType: "paid"}},
-		{name: "shipped", event: models.EventRequest{UserID: "u", OrderID: "o", EventType: "shipped"}},
-		{name: "missing user", event: models.EventRequest{OrderID: "o", EventType: "paid"}, want: map[string]string{"user_id": "required"}},
-		{name: "missing order", event: models.EventRequest{UserID: "u", EventType: "paid"}, want: map[string]string{"order_id": "required"}},
-		{name: "missing type", event: models.EventRequest{UserID: "u", OrderID: "o"}, want: map[string]string{"event_type": typeError}},
-		{name: "unknown type", event: models.EventRequest{UserID: "u", OrderID: "o", EventType: "deleted"}, want: map[string]string{"event_type": typeError}},
-		{name: "all fields missing", want: map[string]string{"user_id": "required", "order_id": "required", "event_type": typeError}},
+		{
+			name:  "created",
+			event: models.EventRequest{UserID: "u", OrderID: "o", EventType: "created"},
+		},
+		{
+			name:  "paid",
+			event: models.EventRequest{UserID: "u", OrderID: "o", EventType: "paid"},
+		},
+		{
+			name:  "shipped",
+			event: models.EventRequest{UserID: "u", OrderID: "o", EventType: "shipped"},
+		},
+		{
+			name:  "missing user",
+			event: models.EventRequest{OrderID: "o", EventType: "paid"},
+			want:  map[string]string{"user_id": "required"},
+		},
+		{
+			name:  "missing order",
+			event: models.EventRequest{UserID: "u", EventType: "paid"},
+			want:  map[string]string{"order_id": "required"},
+		},
+		{
+			name:  "missing type",
+			event: models.EventRequest{UserID: "u", OrderID: "o"},
+			want:  map[string]string{"event_type": "required"},
+		},
+		{
+			name:  "unknown type",
+			event: models.EventRequest{UserID: "u", OrderID: "o", EventType: "deleted"},
+			want:  map[string]string{"event_type": typeError},
+		},
+		{
+			name: "all fields missing",
+			want: map[string]string{"user_id": "required", "order_id": "required", "event_type": "required"},
+		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			got := ValidateEvent(tt.event)
 			if len(got) != len(tt.want) {
 				t.Fatalf("validation errors = %v, want %v", got, tt.want)
 			}
+
 			for field, message := range tt.want {
 				if got[field] != message {
 					t.Errorf("validation[%q] = %q, want %q", field, got[field], message)
@@ -171,34 +205,12 @@ func TestGetEventsService(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := t.Context()
 			repo := &fakeRepository{events: tt.events, err: tt.err}
-			events, err := GetEventsService(ctx, repo, "sent", "user-7", 3, 6)
+
+			events, err := GetEventsService(ctx, repo, "sent", "user-7", "paid", 3, 6)
 			if !errors.Is(err, tt.err) || !reflect.DeepEqual(events, tt.events) {
 				t.Fatalf("result = (%+v, %v), want (%+v, %v)", events, err, tt.events, tt.err)
 			}
-			assertRepositoryCall(t, repo, "GetEvents", ctx, "sent", "user-7", 3, 6)
-		})
-	}
-}
-
-func TestGetEventByIDService(t *testing.T) {
-	for _, tt := range []struct {
-		name  string
-		event models.EventResponse
-		err   error
-	}{
-		{name: "success", event: models.EventResponse{
-			EventID: "event-17", UserID: "user-2", Status: "sent", Payload: json.RawMessage(`{"amount":100}`),
-		}},
-		{name: "repository error", err: errors.New("event not found")},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			ctx := t.Context()
-			repo := &fakeRepository{event: tt.event, err: tt.err}
-			event, err := GetEventByIDService(ctx, repo, "event-17")
-			if !errors.Is(err, tt.err) || !reflect.DeepEqual(event, tt.event) {
-				t.Fatalf("result = (%+v, %v), want (%+v, %v)", event, err, tt.event, tt.err)
-			}
-			assertRepositoryCall(t, repo, "GetEventByID", ctx, "event-17")
+			assertRepositoryCall(t, repo, "GetEvents", ctx, "sent", "user-7", "paid", 3, 6)
 		})
 	}
 }

@@ -3,6 +3,7 @@ package broker
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"practiceRabbitMQ/internal/service"
 	"time"
 
@@ -37,14 +38,21 @@ func realRabbitConnector(rabbitURL string) RabbitConnector {
 		RabbitChannel,
 		error,
 	) {
-		conn, channel, err := connectRabbitMQWithRetry(rabbitURL)
+		conn, channel, err := connectRabbitMQWithRetry(
+			rabbitURL,
+		)
 
 		return conn, channel, err
 	}
 }
 
-func setupRabbitMQ(rabbitURL string) (*amqp091.Connection, *amqp091.Channel, error) {
-
+func setupRabbitMQ(
+	rabbitURL string,
+) (
+	*amqp091.Connection,
+	*amqp091.Channel,
+	error,
+) {
 	rabbitConn, err := amqp091.Dial(
 		rabbitURL,
 	)
@@ -52,32 +60,44 @@ func setupRabbitMQ(rabbitURL string) (*amqp091.Connection, *amqp091.Channel, err
 		return nil, nil, err
 	}
 
-	fmt.Println("connected to RabbitMQ")
+	slog.Info(
+		"connected to RabbitMQ",
+	)
 
 	rabbitChannel, err := rabbitConn.Channel()
 	if err != nil {
-		rabbitConn.Close()
+		_ = rabbitConn.Close()
 		return nil, nil, err
 	}
 
-	fmt.Println("RabbitMQ channel created")
+	slog.Info(
+		"RabbitMQ channel created",
+	)
 
 	err = rabbitChannel.ExchangeDeclare(
-		"orders.exchange", // имя
-		"direct",          // тип exchange
-		true,              // durable
-		false,             // autoDelete
-		false,             // internal
-		false,             // noWait
-		nil,               // arguments
+		"orders.exchange",
+		"direct",
+		true,
+		false,
+		false,
+		false,
+		nil,
 	)
 
 	if err != nil {
-		fmt.Println("exchange declare error:", err)
+		slog.Error(
+			"exchange declare error",
+			"exchange", "orders.exchange",
+			"error", err,
+		)
+
 		return nil, nil, err
 	}
 
-	fmt.Println("orders.exchange created")
+	slog.Info(
+		"exchange created",
+		"exchange", "orders.exchange",
+	)
 
 	err = rabbitChannel.ExchangeDeclare(
 		"notifications.dlx",
@@ -90,49 +110,77 @@ func setupRabbitMQ(rabbitURL string) (*amqp091.Connection, *amqp091.Channel, err
 	)
 
 	if err != nil {
-		fmt.Println("DLX declare error:", err)
+		slog.Error(
+			"DLX declare error",
+			"exchange", "notifications.dlx",
+			"error", err,
+		)
+
 		return nil, nil, err
 	}
 
-	fmt.Println("notifications.dlx created")
-
-	_, err = rabbitChannel.QueueDeclare(
-		"notifications.dlq", // имя очереди
-		true,                // durable
-		false,               // autoDelete
-		false,               // exclusive
-		false,               // noWait
-		nil,                 // arguments
+	slog.Info(
+		"DLX created",
+		"exchange", "notifications.dlx",
 	)
 
-	if err != nil {
-		fmt.Println("DLQ declare error:", err)
-		return nil, nil, err
-	}
-
-	fmt.Println("notifications.dlq created")
-
-	err = rabbitChannel.QueueBind(
-		"notifications.dlq", // queue
-		"failed",            // routing key
-		"notifications.dlx", // exchange
+	_, err = rabbitChannel.QueueDeclare(
+		"notifications.dlq",
+		true,
+		false,
+		false,
 		false,
 		nil,
 	)
 
 	if err != nil {
-		fmt.Println("DLQ bind error:", err)
+		slog.Error(
+			"DLQ declare error",
+			"queue", "notifications.dlq",
+			"error", err,
+		)
+
 		return nil, nil, err
 	}
 
-	fmt.Println("notifications.dlq bound to notifications.dlx")
+	slog.Info(
+		"DLQ created",
+		"queue", "notifications.dlq",
+	)
+
+	err = rabbitChannel.QueueBind(
+		"notifications.dlq",
+		"failed",
+		"notifications.dlx",
+		false,
+		nil,
+	)
+
+	if err != nil {
+		slog.Error(
+			"DLQ bind error",
+			"queue", "notifications.dlq",
+			"exchange", "notifications.dlx",
+			"routing_key", "failed",
+			"error", err,
+		)
+
+		return nil, nil, err
+	}
+
+	slog.Info(
+		"DLQ bound",
+		"queue", "notifications.dlq",
+		"exchange", "notifications.dlx",
+		"routing_key", "failed",
+	)
 
 	_, err = rabbitChannel.QueueDeclare(
 		"notifications.queue",
-		true,  // durable
-		false, // autoDelete
-		false, // exclusive
-		false, // noWait
+		true,
+		false,
+		false,
+		false,
 		amqp091.Table{
 			"x-dead-letter-exchange":    "notifications.dlx",
 			"x-dead-letter-routing-key": "failed",
@@ -140,60 +188,105 @@ func setupRabbitMQ(rabbitURL string) (*amqp091.Connection, *amqp091.Channel, err
 	)
 
 	if err != nil {
-		fmt.Println("notifications queue declare error:", err)
+		slog.Error(
+			"notifications queue declare error",
+			"queue", "notifications.queue",
+			"error", err,
+		)
+
 		return nil, nil, err
 	}
 
-	fmt.Println("notifications.queue created")
+	slog.Info(
+		"notifications queue created",
+		"queue", "notifications.queue",
+	)
 
 	err = rabbitChannel.QueueBind(
-		"notifications.queue", // queue
-		"notifications",       // routing key
-		"orders.exchange",     // exchange
+		"notifications.queue",
+		"notifications",
+		"orders.exchange",
 		false,
 		nil,
 	)
 
 	if err != nil {
-		fmt.Println("notifications queue bind error:", err)
+		slog.Error(
+			"notifications queue bind error",
+			"queue", "notifications.queue",
+			"exchange", "orders.exchange",
+			"routing_key", "notifications",
+			"error", err,
+		)
+
 		return nil, nil, err
 	}
 
-	fmt.Println("notifications.queue bound to orders.exchange")
+	slog.Info(
+		"notifications queue bound",
+		"queue", "notifications.queue",
+		"exchange", "orders.exchange",
+		"routing_key", "notifications",
+	)
 
 	return rabbitConn, rabbitChannel, nil
 }
 
-func connectRabbitMQWithRetry(rabbitURL string) (*amqp091.Connection, *amqp091.Channel, error) {
-	return connectRabbitMQWithRetryUsing(func() (*amqp091.Connection, *amqp091.Channel, error) {
-		return setupRabbitMQ(rabbitURL)
-	}, time.Sleep)
+func connectRabbitMQWithRetry(
+	rabbitURL string,
+) (
+	*amqp091.Connection,
+	*amqp091.Channel,
+	error,
+) {
+	return connectRabbitMQWithRetryUsing(
+		func() (
+			*amqp091.Connection,
+			*amqp091.Channel,
+			error,
+		) {
+			return setupRabbitMQ(
+				rabbitURL,
+			)
+		},
+		time.Sleep,
+	)
 }
 
 func connectRabbitMQWithRetryUsing(
-	connect func() (*amqp091.Connection, *amqp091.Channel, error),
+	connect func() (
+		*amqp091.Connection,
+		*amqp091.Channel,
+		error,
+	),
 	sleep func(time.Duration),
-) (*amqp091.Connection, *amqp091.Channel, error) {
+) (
+	*amqp091.Connection,
+	*amqp091.Channel,
+	error,
+) {
 	delay := 1 * time.Second
+
 	var lastErr error
 
 	for attempt := 1; attempt <= 5; attempt++ {
-
 		conn, channel, err := connect()
 
 		if err == nil {
 			return conn, channel, nil
 		}
+
 		lastErr = err
+
 		if attempt == 5 {
 			break
 		}
 
-		fmt.Println(
-			"RabbitMQ connection failed, attempt:",
-			attempt,
-			"retry in:",
-			delay,
+		slog.Warn(
+			"RabbitMQ connection failed",
+			"attempt", attempt,
+			"retry_in", delay,
+			"error", err,
 		)
 
 		sleep(delay)
@@ -201,13 +294,15 @@ func connectRabbitMQWithRetryUsing(
 		delay = delay * 2
 	}
 
-	return nil, nil, fmt.Errorf("could not connect to RabbitMQ: %w", lastErr)
+	return nil, nil, fmt.Errorf(
+		"could not connect to RabbitMQ: %w",
+		lastErr,
+	)
 }
 
 func StartRabbitMQ(
 	ctx context.Context,
 	repo RabbitRepository,
-
 	rabbitURL string,
 ) {
 	startRabbitMQWithConnector(
@@ -223,21 +318,22 @@ func startRabbitMQWithConnector(
 	connect RabbitConnector,
 ) {
 	for {
-
-		// Если приложение попросили остановиться —
-		// больше не подключаемся.
 		select {
 		case <-ctx.Done():
-			fmt.Println("RabbitMQ manager stopped")
+			slog.Info(
+				"RabbitMQ manager stopped",
+			)
 			return
+
 		default:
 		}
 
 		conn, rabbitChannel, err := connect()
+
 		if err != nil {
-			fmt.Println(
-				"RabbitMQ connection error:",
-				err,
+			slog.Error(
+				"RabbitMQ connection error",
+				"error", err,
 			)
 
 			continue
@@ -248,9 +344,10 @@ func startRabbitMQWithConnector(
 			1,
 		)
 
-		conn.NotifyClose(closeChan)
+		conn.NotifyClose(
+			closeChan,
+		)
 
-		// Отдельный context для publisher.
 		publisherCtx, cancelPublisher :=
 			context.WithCancel(ctx)
 
@@ -266,9 +363,9 @@ func startRabbitMQWithConnector(
 		)
 
 		if err != nil {
-			fmt.Println(
-				"consumer start error:",
-				err,
+			slog.Error(
+				"consumer start error",
+				"error", err,
 			)
 
 			cancelPublisher()
@@ -280,27 +377,22 @@ func startRabbitMQWithConnector(
 		}
 
 		select {
-
-		// Всё приложение остановилось.
 		case <-ctx.Done():
-
 			cancelPublisher()
 
 			_ = rabbitChannel.Close()
 			_ = conn.Close()
 
-			fmt.Println(
+			slog.Info(
 				"RabbitMQ manager stopped",
 			)
 
 			return
 
-		// RabbitMQ соединение оборвалось.
 		case err := <-closeChan:
-
-			fmt.Println(
-				"RabbitMQ connection lost:",
-				err,
+			slog.Warn(
+				"RabbitMQ connection lost",
+				"error", err,
 			)
 
 			cancelPublisher()
@@ -308,8 +400,9 @@ func startRabbitMQWithConnector(
 			_ = rabbitChannel.Close()
 			_ = conn.Close()
 
-			// После этого for начинается заново
-			// и происходит reconnect.
+			// Цикл начинается заново,
+			// поэтому приложение попробует
+			// подключиться к RabbitMQ снова.
 		}
 	}
 }

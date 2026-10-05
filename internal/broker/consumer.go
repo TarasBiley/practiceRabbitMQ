@@ -3,7 +3,7 @@ package broker
 import (
 	"context"
 	"encoding/json"
-	"fmt"
+	"log/slog"
 	"math/rand"
 	models "practiceRabbitMQ/internal/domain"
 	"practiceRabbitMQ/internal/service"
@@ -34,9 +34,14 @@ func startConsumer(
 	repo ConsumerRepository,
 	channel MessageConsumer,
 ) error {
-	_, err := startConsumerWithFailureDecider(repo, channel, func() bool {
-		return rand.Intn(100) < 10
-	})
+	_, err := startConsumerWithFailureDecider(
+		repo,
+		channel,
+		func() bool {
+			return rand.Intn(100) < 10
+		},
+	)
+
 	return err
 }
 
@@ -60,11 +65,11 @@ func startConsumerWithFailureDecider(
 	}
 
 	done := make(chan struct{})
+
 	go func() {
 		defer close(done)
 
 		for msg := range messages {
-
 			err := processMessage(
 				repo,
 				msg,
@@ -72,9 +77,10 @@ func startConsumerWithFailureDecider(
 			)
 
 			if err != nil {
-				fmt.Println(
-					"consumer error:",
-					err,
+				slog.Error(
+					"consumer error",
+					"correlation_id", msg.CorrelationId,
+					"error", err,
 				)
 			}
 		}
@@ -82,29 +88,36 @@ func startConsumerWithFailureDecider(
 
 	return done, nil
 }
+
 func processMessage(
 	repo ConsumerRepository,
 	msg amqp091.Delivery,
 	shouldFail bool,
 ) error {
-
 	var event models.EventMessage
 
 	err := json.Unmarshal(msg.Body, &event)
 	if err != nil {
+		slog.Error(
+			"failed to decode message",
+			"correlation_id", msg.CorrelationId,
+			"error", err,
+		)
+
 		return err
 	}
 
-	fmt.Println("consumer received:", event.EventID)
+	logger := slog.With(
+		"correlation_id", msg.CorrelationId,
+		"event_id", event.EventID,
+	)
+
+	logger.Info("consumer received event")
 
 	time.Sleep(100 * time.Millisecond)
 
 	if shouldFail {
-
-		fmt.Println(
-			"simulated notification error:",
-			event.EventID,
-		)
+		logger.Warn("simulated notification error")
 
 		retryCount, err := service.IncrementRetryCountService(
 			context.Background(),
@@ -113,11 +126,20 @@ func processMessage(
 		)
 
 		if err != nil {
+			logger.Error(
+				"failed to increment retry count",
+				"error", err,
+			)
+
 			return err
 		}
 
-		if retryCount >= 3 {
+		logger.Warn(
+			"notification retry",
+			"retry_count", retryCount,
+		)
 
+		if retryCount >= 3 {
 			err = service.MarkEventFailedService(
 				context.Background(),
 				repo,
@@ -125,8 +147,18 @@ func processMessage(
 			)
 
 			if err != nil {
+				logger.Error(
+					"failed to mark event as failed",
+					"error", err,
+				)
+
 				return err
 			}
+
+			logger.Error(
+				"event marked as failed",
+				"retry_count", retryCount,
+			)
 		}
 
 		return msg.Nack(false, false)
@@ -139,16 +171,25 @@ func processMessage(
 	)
 
 	if err != nil {
+		logger.Error(
+			"failed to mark event as sent",
+			"error", err,
+		)
+
 		return err
 	}
 
 	err = msg.Ack(false)
 	if err != nil {
+		logger.Error(
+			"failed to ack message",
+			"error", err,
+		)
+
 		return err
 	}
 
-	fmt.Println("event sent:", event.EventID)
-	fmt.Println("correlation_id:", msg.CorrelationId)
+	logger.Info("event sent")
 
 	return nil
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	models "practiceRabbitMQ/internal/domain"
 
+	"github.com/go-playground/validator/v10"
 	"github.com/google/uuid"
 )
 
@@ -21,6 +22,7 @@ type EventLister interface {
 		ctx context.Context,
 		status string,
 		userID string,
+		eventType string,
 		limit int,
 		offset int,
 	) ([]models.EventResponse, error)
@@ -69,11 +71,11 @@ type EventFailedMarker interface {
 func CreateEventService(
 	ctx context.Context,
 	repo EventRepository,
+	correlationID string,
 	event models.EventRequest,
 ) (string, error) {
 
 	eventID := uuid.New().String()
-	correlationID := uuid.New().String()
 
 	err := repo.CreateEvent(
 		ctx,
@@ -89,32 +91,61 @@ func CreateEventService(
 	return eventID, nil
 }
 
-func ValidateEvent(event models.EventRequest) map[string]string {
+func ValidateEvent(
+	event models.EventRequest,
+) map[string]string {
+
+	validate := validator.New()
+
+	err := validate.Struct(event)
+	if err == nil {
+		return nil
+	}
+
 	fields := make(map[string]string)
 
-	if event.UserID == "" {
-		fields["user_id"] = "required"
+	validationErrors, ok := err.(validator.ValidationErrors)
+	if !ok {
+		return fields
 	}
 
-	if event.OrderID == "" {
-		fields["order_id"] = "required"
-	}
+	for _, fieldErr := range validationErrors {
+		switch fieldErr.Field() {
 
-	if event.EventType != "created" &&
-		event.EventType != "paid" &&
-		event.EventType != "shipped" {
+		case "UserID":
+			switch fieldErr.Tag() {
+			case "required":
+				fields["user_id"] = "required"
+			case "max":
+				fields["user_id"] = "maximum length is 64"
+			}
 
-		fields["event_type"] = "must be created, paid or shipped"
+		case "OrderID":
+			switch fieldErr.Tag() {
+			case "required":
+				fields["order_id"] = "required"
+			case "max":
+				fields["order_id"] = "maximum length is 64"
+			}
+
+		case "EventType":
+			switch fieldErr.Tag() {
+			case "required":
+				fields["event_type"] = "required"
+			case "oneof":
+				fields["event_type"] = "must be created, paid or shipped"
+			}
+		}
 	}
 
 	return fields
 }
-
 func GetEventsService(
 	ctx context.Context,
 	repo EventLister,
 	status string,
 	userID string,
+	eventType string,
 	limit int,
 	offset int,
 ) ([]models.EventResponse, error) {
@@ -123,10 +154,12 @@ func GetEventsService(
 		ctx,
 		status,
 		userID,
+		eventType,
 		limit,
 		offset,
 	)
 }
+
 func GetEventByIDService(
 	ctx context.Context,
 	repo EventGetter,

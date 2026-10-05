@@ -3,20 +3,21 @@ package main
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
+	"syscall"
+	"time"
 
 	_ "practiceRabbitMQ/docs"
 
 	"practiceRabbitMQ/internal/broker"
 	"practiceRabbitMQ/internal/config"
 	"practiceRabbitMQ/internal/handler"
+	"practiceRabbitMQ/internal/middleware"
 	"practiceRabbitMQ/internal/repository"
-
-	"sync"
-	"syscall"
-	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	httpSwagger "github.com/swaggo/http-swagger/v2"
@@ -28,8 +29,21 @@ import (
 // @host localhost:8080
 // @BasePath /
 func main() {
+	logger := slog.New(
+		slog.NewJSONHandler(
+			os.Stdout,
+			nil,
+		),
+	)
+
+	slog.SetDefault(logger)
+
 	if err := run(); err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		slog.Error(
+			"application stopped with error",
+			"error", err,
+		)
+
 		os.Exit(1)
 	}
 }
@@ -42,26 +56,32 @@ func run() error {
 	)
 	defer stop()
 
-	config := config.LoadConfig()
+	cfg := config.LoadConfig()
 
 	pool, err := pgxpool.New(
 		context.Background(),
-		config.DatabaseURL,
+		cfg.DatabaseURL,
 	)
-
 	if err != nil {
-		return fmt.Errorf("database connection error: %w", err)
+		return fmt.Errorf(
+			"database connection error: %w",
+			err,
+		)
 	}
 
 	defer pool.Close()
 
 	if err := pool.Ping(context.Background()); err != nil {
-		return fmt.Errorf("database ping error: %w", err)
+		return fmt.Errorf(
+			"database ping error: %w",
+			err,
+		)
 	}
 
-	fmt.Println("connected to PostgreSQL")
+	slog.Info("connected to PostgreSQL")
 
 	repo := repository.NewRepository(pool)
+
 	var wg sync.WaitGroup
 
 	wg.Add(1)
@@ -72,33 +92,70 @@ func run() error {
 		broker.StartRabbitMQ(
 			ctx,
 			repo,
-			config.RabbitURL,
+			cfg.RabbitURL,
 		)
 	}()
 
-	http.HandleFunc("/api/events", func(w http.ResponseWriter, r *http.Request) {
+	http.HandleFunc(
+		"/api/events",
+		func(
+			w http.ResponseWriter,
+			r *http.Request,
+		) {
+			switch r.Method {
 
-		switch r.Method {
+			case http.MethodPost:
+				handler.CreateEventHandler(
+					repo,
+					w,
+					r,
+				)
 
-		case http.MethodPost:
-			handler.CreateEventHandler(repo, w, r)
+			case http.MethodGet:
+				handler.GetEventsHandler(
+					repo,
+					w,
+					r,
+				)
 
-		case http.MethodGet:
-			handler.GetEventsHandler(repo, w, r)
+			default:
+				http.Error(
+					w,
+					"Method not allowed",
+					http.StatusMethodNotAllowed,
+				)
+			}
+		},
+	)
 
-		default:
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		}
+	http.HandleFunc(
+		"/api/events/",
+		func(
+			w http.ResponseWriter,
+			r *http.Request,
+		) {
+			handler.GetEventByIDHandler(
+				repo,
+				w,
+				r,
+			)
+		},
+	)
 
-	})
+	http.HandleFunc(
+		"/api/admin/retry-pending",
+		func(
+			w http.ResponseWriter,
+			r *http.Request,
+		) {
+			handler.RetryPendingHandler(
+				repo,
+				w,
+				r,
+			)
+		},
+	)
 
-	http.HandleFunc("/api/events/", func(w http.ResponseWriter, r *http.Request) {
-		handler.GetEventByIDHandler(repo, w, r)
-	})
-
-	http.HandleFunc("/api/admin/retry-pending", func(w http.ResponseWriter, r *http.Request) {
-		handler.RetryPendingHandler(repo, w, r)
-	})
 	http.Handle(
 		"/swagger/",
 		httpSwagger.Handler(
@@ -107,30 +164,49 @@ func run() error {
 			),
 		),
 	)
+
 	server := &http.Server{
-		Addr: config.HTTPAddr,
+		Addr: cfg.HTTPAddr,
+
+		// Каждый HTTP-запрос сначала проходит
+		// через correlation ID middleware.
+		Handler: middleware.CorrelationID(
+			http.DefaultServeMux,
+		),
 	}
 
-	serverErrors := make(chan error, 1)
+	serverErrors := make(
+		chan error,
+		1,
+	)
+
 	go func() {
-		fmt.Println("server started on", config.HTTPAddr)
+		slog.Info(
+			"HTTP server started",
+			"addr", cfg.HTTPAddr,
+		)
 
 		err := server.ListenAndServe()
 
 		if err == http.ErrServerClosed {
 			err = nil
 		}
+
 		serverErrors <- err
 	}()
 
 	var serverErr error
+
 	select {
 	case serverErr = <-serverErrors:
+
 	case <-ctx.Done():
 	}
+
 	stop()
 
-	fmt.Println("shutting down application...")
+	slog.Info("shutting down application")
+
 	shutdownCtx, cancel := context.WithTimeout(
 		context.Background(),
 		5*time.Second,
@@ -138,16 +214,26 @@ func run() error {
 	defer cancel()
 
 	err = server.Shutdown(shutdownCtx)
+
 	if err != nil {
-		fmt.Println("HTTP shutdown error:", err)
+		slog.Error(
+			"HTTP shutdown error",
+			"error", err,
+		)
 	}
 
-	fmt.Println("HTTP server stopped")
+	slog.Info("HTTP server stopped")
+
 	wg.Wait()
 
-	fmt.Println("RabbitMQ stopped")
+	slog.Info("RabbitMQ stopped")
+
 	if serverErr != nil {
-		return fmt.Errorf("server error: %w", serverErr)
+		return fmt.Errorf(
+			"server error: %w",
+			serverErr,
+		)
 	}
+
 	return nil
 }

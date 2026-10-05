@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	models "practiceRabbitMQ/internal/domain"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -57,107 +56,41 @@ func (r *Repository) CreateEvent(
 
 func (r *Repository) GetEvents(
 	ctx context.Context,
-
 	status string,
 	userID string,
+	eventType string,
 	limit int,
 	offset int,
 ) ([]models.EventResponse, error) {
-	var rows pgx.Rows
-	var err error
 
-	if status != "" && userID != "" {
-
-		rows, err = r.pool.Query(
-			ctx,
-			`SELECT event_id::text,
-		        user_id,
-		        order_id,
-		        event_type,
-		        payload,
-		        status,
-		        retry_count,
-		        error_message,
-		        created_at,
-		        updated_at
-		 FROM events
-		 WHERE status = $1 AND user_id = $2
-		 ORDER BY created_at DESC
-		 LIMIT $3
-		 OFFSET $4`,
+	rows, err := r.pool.Query(
+		ctx,
+		`
+		SELECT
+			event_id::text,
+			user_id,
+			order_id,
+			event_type,
+			payload,
 			status,
-			userID,
-			limit,
-			offset,
-		)
-
-	} else if status != "" {
-		rows, err = r.pool.Query(
-			ctx,
-			`SELECT event_id::text,
-		        user_id,
-		        order_id,
-		        event_type,
-		        payload,
-		        status,
-		        retry_count,
-		        error_message,
-		        created_at,
-		        updated_at
-		 FROM events
-		 WHERE status = $1
-		 ORDER BY created_at DESC
-		 LIMIT $2
-		 OFFSET $3`,
-			status,
-			limit,
-			offset,
-		)
-	} else if userID != "" {
-
-		rows, err = r.pool.Query(
-			ctx,
-			`SELECT event_id::text,
-		        user_id,
-		        order_id,
-		        event_type,
-		        payload,
-		        status,
-		        retry_count,
-		        error_message,
-		        created_at,
-		        updated_at
-		 FROM events
-		 WHERE user_id = $1
-		 ORDER BY created_at DESC
-		 LIMIT $2
-		 OFFSET $3`,
-			userID,
-			limit,
-			offset,
-		)
-
-	} else {
-		rows, err = r.pool.Query(
-			ctx,
-			`SELECT event_id::text,
-		        user_id,
-		        order_id,
-		        event_type,
-		        payload,
-		        status,
-		        retry_count,
-		        error_message,
-		        created_at,
-		        updated_at
-		 FROM events
-		 ORDER BY created_at DESC
-		 LIMIT $1
-		 OFFSET $2`,
-			limit,
-			offset,
-		)
-	}
+			retry_count,
+			error_message,
+			created_at,
+			updated_at
+		FROM events
+		WHERE user_id = $1
+		  AND ($2 = '' OR status = $2)
+		  AND ($3 = '' OR event_type = $3)
+		ORDER BY created_at DESC
+		LIMIT $4
+		OFFSET $5
+		`,
+		userID,
+		status,
+		eventType,
+		limit,
+		offset,
+	)
 
 	if err != nil {
 		return nil, err
@@ -188,7 +121,6 @@ func (r *Repository) GetEvents(
 		}
 
 		events = append(events, event)
-
 	}
 
 	if err := rows.Err(); err != nil {

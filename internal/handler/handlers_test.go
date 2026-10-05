@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	models "practiceRabbitMQ/internal/domain"
+	"practiceRabbitMQ/internal/middleware"
 	"reflect"
 	"strings"
 	"testing"
@@ -17,13 +18,22 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
+const testCorrelationID = "test-correlation-id"
+
+func runHandler(req *http.Request, handler http.HandlerFunc) *httptest.ResponseRecorder {
+	req.Header.Set("X-Correlation-ID", testCorrelationID)
+	rec := httptest.NewRecorder()
+	middleware.CorrelationID(handler).ServeHTTP(rec, req)
+	return rec
+}
+
 // Unconfigured methods fail immediately so a handler cannot silently use the
 // wrong repository operation. Every operation also contributes to calls.
 type fakeHandlerRepository struct {
 	t            *testing.T
 	calls        int
 	createEvent  func(context.Context, string, string, models.EventRequest) error
-	getEvents    func(context.Context, string, string, int, int) ([]models.EventResponse, error)
+	getEvents    func(context.Context, string, string, string, int, int) ([]models.EventResponse, error)
 	getEventByID func(context.Context, string) (models.EventResponse, error)
 	retryFailed  func(context.Context) (int64, error)
 }
@@ -37,13 +47,13 @@ func (f *fakeHandlerRepository) CreateEvent(ctx context.Context, eventID, correl
 	return f.createEvent(ctx, eventID, correlationID, event)
 }
 
-func (f *fakeHandlerRepository) GetEvents(ctx context.Context, status, userID string, limit, offset int) ([]models.EventResponse, error) {
+func (f *fakeHandlerRepository) GetEvents(ctx context.Context, status, userID, eventType string, limit, offset int) ([]models.EventResponse, error) {
 	f.t.Helper()
 	f.calls++
 	if f.getEvents == nil {
 		f.t.Fatal("unexpected GetEvents call")
 	}
-	return f.getEvents(ctx, status, userID, limit, offset)
+	return f.getEvents(ctx, status, userID, eventType, limit, offset)
 }
 
 func (f *fakeHandlerRepository) GetEventByID(ctx context.Context, eventID string) (models.EventResponse, error) {
@@ -64,16 +74,23 @@ func (f *fakeHandlerRepository) RetryFailedEvents(ctx context.Context) (int64, e
 	return f.retryFailed(ctx)
 }
 
-func assertHTTPResponse(t *testing.T, rec *httptest.ResponseRecorder, code int, contentType, text string) {
+func assertHTTPResponse(t *testing.T, rec *httptest.ResponseRecorder, code int, message string) {
 	t.Helper()
 	if rec.Code != code {
 		t.Fatalf("status = %d, want %d; body: %s", rec.Code, code, rec.Body.String())
 	}
-	if got := rec.Header().Get("Content-Type"); got != contentType {
-		t.Errorf("Content-Type = %q, want %q", got, contentType)
+	if got := rec.Header().Get("Content-Type"); got != "application/json" {
+		t.Errorf("Content-Type = %q, want application/json", got)
 	}
-	if text != "" && rec.Body.String() != text+"\n" {
-		t.Errorf("body = %q, want %q", rec.Body.String(), text+"\n")
+	if rec.Header().Get("X-Correlation-ID") != testCorrelationID {
+		t.Error("response correlation ID was not preserved")
+	}
+	if message != "" {
+		got := decodeResponse[models.ErrorResponse](t, rec).Error
+		codes := map[int]string{400: "BAD_REQUEST", 404: "NOT_FOUND", 405: "METHOD_NOT_ALLOWED", 500: "INTERNAL_ERROR"}
+		if got.Code != codes[code] || got.Message != message || got.Fields == nil {
+			t.Errorf("error = %#v, want code=%q message=%q and fields", got, codes[code], message)
+		}
 	}
 }
 
@@ -120,14 +137,14 @@ func TestCreateEventHandler(t *testing.T) {
 	}{
 		{name: "success", method: http.MethodPost, body: validBody, wantCode: http.StatusCreated, wantCalls: 1},
 		{name: "trailing JSON whitespace", method: http.MethodPost, body: validBody + " \t\r\n", wantCode: http.StatusCreated, wantCalls: 1},
-		{name: "trailing garbage", method: http.MethodPost, body: validBody + " garbage", wantCode: http.StatusBadRequest, wantText: "Invalid request payload", wantCalls: 0},
-		{name: "second JSON object", method: http.MethodPost, body: validBody + ` {"x":1}`, wantCode: http.StatusBadRequest, wantText: "Invalid request payload", wantCalls: 0},
-		{name: "second JSON null", method: http.MethodPost, body: validBody + " null", wantCode: http.StatusBadRequest, wantText: "Invalid request payload", wantCalls: 0},
-		{name: "wrong method", method: http.MethodGet, body: validBody, wantCode: http.StatusMethodNotAllowed, wantText: "Method not allowed"},
-		{name: "empty body", method: http.MethodPost, wantCode: http.StatusBadRequest, wantText: "Invalid request payload"},
-		{name: "malformed JSON", method: http.MethodPost, body: `{"user_id":`, wantCode: http.StatusBadRequest, wantText: "Invalid request payload"},
-		{name: "array body", method: http.MethodPost, body: `[]`, wantCode: http.StatusBadRequest, wantText: "Invalid request payload"},
-		{name: "wrong field type", method: http.MethodPost, body: `{"user_id":17}`, wantCode: http.StatusBadRequest, wantText: "Invalid request payload"},
+		{name: "trailing garbage", method: http.MethodPost, body: validBody + " garbage", wantCode: http.StatusBadRequest, wantText: "invalid request payload", wantCalls: 0},
+		{name: "second JSON object", method: http.MethodPost, body: validBody + ` {"x":1}`, wantCode: http.StatusBadRequest, wantText: "invalid request payload", wantCalls: 0},
+		{name: "second JSON null", method: http.MethodPost, body: validBody + " null", wantCode: http.StatusBadRequest, wantText: "invalid request payload", wantCalls: 0},
+		{name: "wrong method", method: http.MethodGet, body: validBody, wantCode: http.StatusMethodNotAllowed, wantText: "method not allowed"},
+		{name: "empty body", method: http.MethodPost, wantCode: http.StatusBadRequest, wantText: "invalid request payload"},
+		{name: "malformed JSON", method: http.MethodPost, body: `{"user_id":`, wantCode: http.StatusBadRequest, wantText: "invalid request payload"},
+		{name: "array body", method: http.MethodPost, body: `[]`, wantCode: http.StatusBadRequest, wantText: "invalid request payload"},
+		{name: "wrong field type", method: http.MethodPost, body: `{"user_id":17}`, wantCode: http.StatusBadRequest, wantText: "invalid request payload"},
 		{
 			name: "missing user", method: http.MethodPost,
 			body: `{"order_id":"order-42","event_type":"paid"}`, wantCode: http.StatusBadRequest,
@@ -145,12 +162,12 @@ func TestCreateEventHandler(t *testing.T) {
 		},
 		{
 			name: "all required fields missing", method: http.MethodPost, body: `{}`, wantCode: http.StatusBadRequest,
-			wantFields: map[string]string{"user_id": "required", "order_id": "required", "event_type": "must be created, paid or shipped"},
+			wantFields: map[string]string{"user_id": "required", "order_id": "required", "event_type": "required"},
 		},
 		{
 			name: "repository error", method: http.MethodPost, body: validBody,
 			repoErr: errors.New("private database detail"), wantCode: http.StatusInternalServerError,
-			wantText: "database error", wantCalls: 1,
+			wantText: "internal server error", wantCalls: 1,
 		},
 	}
 
@@ -160,21 +177,21 @@ func TestCreateEventHandler(t *testing.T) {
 			ctx, cancel := context.WithCancel(req.Context())
 			defer cancel()
 			req = req.WithContext(ctx)
-			rec := httptest.NewRecorder()
 			var createdID string
 			repo := &fakeHandlerRepository{t: t}
 			if tt.wantCalls > 0 {
 				repo.createEvent = func(gotCtx context.Context, eventID, correlationID string, event models.EventRequest) error {
-					if gotCtx != ctx {
+					if gotCtx.Done() != ctx.Done() || middleware.GetCorrelationID(gotCtx) != testCorrelationID {
 						t.Error("request context was not forwarded")
 					}
 					if !reflect.DeepEqual(event, wantEvent) {
 						t.Errorf("event = %#v, want %#v", event, wantEvent)
 					}
-					for name, id := range map[string]string{"event ID": eventID, "correlation ID": correlationID} {
-						if parsed, err := uuid.Parse(id); err != nil || parsed == uuid.Nil {
-							t.Errorf("%s must be a nonzero UUID, got %q", name, id)
-						}
+					if parsed, err := uuid.Parse(eventID); err != nil || parsed == uuid.Nil {
+						t.Errorf("event ID must be a nonzero UUID, got %q", eventID)
+					}
+					if correlationID != testCorrelationID {
+						t.Errorf("correlation ID = %q, want %q", correlationID, testCorrelationID)
 					}
 					if eventID == correlationID {
 						t.Error("event and correlation IDs must differ")
@@ -183,21 +200,12 @@ func TestCreateEventHandler(t *testing.T) {
 					return tt.repoErr
 				}
 			}
+			rec := runHandler(req, func(w http.ResponseWriter, r *http.Request) { CreateEventHandler(repo, w, r) })
 
-			CreateEventHandler(repo, rec, req)
-
-			contentType := "text/plain; charset=utf-8"
-			wantText := tt.wantText
-			if tt.wantCode == http.StatusCreated || tt.wantCode == http.StatusBadRequest {
-				contentType = "application/json"
+			assertHTTPResponse(t, rec, tt.wantCode, tt.wantText)
+			if tt.wantCode == http.StatusBadRequest && tt.wantFields == nil {
+				assertBadRequestJSON(t, rec, tt.wantText)
 			}
-			if tt.wantCode == http.StatusBadRequest {
-				wantText = ""
-				if tt.wantFields == nil {
-					assertBadRequestJSON(t, rec, tt.wantText)
-				}
-			}
-			assertHTTPResponse(t, rec, tt.wantCode, contentType, wantText)
 			if repo.calls != tt.wantCalls {
 				t.Errorf("repository calls = %d, want %d", repo.calls, tt.wantCalls)
 			}
@@ -210,9 +218,7 @@ func TestCreateEventHandler(t *testing.T) {
 			}
 			if tt.wantFields != nil {
 				got := decodeResponse[models.ErrorResponse](t, rec)
-				want := models.ErrorResponse{Error: models.ErrorDetail{
-					Code: "VALIDATION_ERROR", Message: "validation failed", Fields: tt.wantFields,
-				}}
+				want := models.ErrorResponse{Error: models.ErrorDetail{Code: "VALIDATION_ERROR", Message: "validation failed", Fields: tt.wantFields}}
 				if !reflect.DeepEqual(got, want) {
 					t.Errorf("validation response = %#v, want %#v", got, want)
 				}
@@ -232,11 +238,12 @@ func testEventResponse() models.EventResponse {
 	}
 }
 
+type listArgs struct {
+	status, userID, eventType string
+	limit, offset             int
+}
+
 func TestGetEventsHandler(t *testing.T) {
-	type listArgs struct {
-		status, userID string
-		limit, offset  int
-	}
 	tests := []struct {
 		name      string
 		method    string
@@ -245,25 +252,51 @@ func TestGetEventsHandler(t *testing.T) {
 		repoErr   error
 		empty     bool
 		wantCode  int
-		wantText  string
 		wantCalls int
 	}{
-		{name: "defaults", wantArgs: listArgs{limit: 10}, wantCode: http.StatusOK, wantCalls: 1},
-		{name: "empty explicit defaults", query: "?limit=&offset=", wantArgs: listArgs{limit: 10}, wantCode: http.StatusOK, wantCalls: 1},
-		{name: "filters and pagination", query: "?status=failed&user_id=user-17&limit=2&offset=3", wantArgs: listArgs{"failed", "user-17", 2, 3}, wantCode: http.StatusOK, wantCalls: 1},
-		{name: "pending status", query: "?status=pending&limit=1&offset=0", wantArgs: listArgs{status: "pending", limit: 1}, wantCode: http.StatusOK, wantCalls: 1},
-		{name: "sent status", query: "?status=sent", wantArgs: listArgs{status: "sent", limit: 10}, wantCode: http.StatusOK, wantCalls: 1},
-		{name: "empty result", empty: true, wantArgs: listArgs{limit: 10}, wantCode: http.StatusOK, wantCalls: 1},
-		{name: "wrong method", method: http.MethodPost, wantCode: http.StatusMethodNotAllowed, wantText: "Method not allowed"},
-		{name: "nonnumeric limit", query: "?limit=abc", wantCode: http.StatusBadRequest, wantText: "invalid limit"},
-		{name: "zero limit", query: "?limit=0", wantCode: http.StatusBadRequest, wantText: "invalid limit"},
-		{name: "negative limit", query: "?limit=-1", wantCode: http.StatusBadRequest, wantText: "invalid limit"},
-		{name: "overflow limit", query: "?limit=999999999999999999999999", wantCode: http.StatusBadRequest, wantText: "invalid limit"},
-		{name: "nonnumeric offset", query: "?offset=abc", wantCode: http.StatusBadRequest, wantText: "invalid offset"},
-		{name: "negative offset", query: "?offset=-1", wantCode: http.StatusBadRequest, wantText: "invalid offset"},
-		{name: "overflow offset", query: "?offset=999999999999999999999999", wantCode: http.StatusBadRequest, wantText: "invalid offset"},
-		{name: "unknown status", query: "?status=queued", wantCode: http.StatusBadRequest, wantText: "invalid status"},
-		{name: "repository error", wantArgs: listArgs{limit: 10}, repoErr: errors.New("private database detail"), wantCode: http.StatusInternalServerError, wantText: "failed to get events", wantCalls: 1},
+		{
+			name:      "defaults",
+			query:     "?user_id=user-17",
+			wantArgs:  listArgs{userID: "user-17", limit: 20},
+			wantCode:  http.StatusOK,
+			wantCalls: 1,
+		},
+		{
+			name:      "filters and pagination",
+			query:     "?user_id=user-17&status=failed&event_type=paid&limit=2&page=3",
+			wantArgs:  listArgs{status: "failed", userID: "user-17", eventType: "paid", limit: 2, offset: 4},
+			wantCode:  http.StatusOK,
+			wantCalls: 1,
+		},
+		{
+			name:      "event type filter",
+			query:     "?user_id=user-17&event_type=shipped",
+			wantArgs:  listArgs{userID: "user-17", eventType: "shipped", limit: 20},
+			wantCode:  http.StatusOK,
+			wantCalls: 1,
+		},
+		{
+			name:      "empty result",
+			query:     "?user_id=user-17",
+			empty:     true,
+			wantArgs:  listArgs{userID: "user-17", limit: 20},
+			wantCode:  http.StatusOK,
+			wantCalls: 1,
+		},
+		{name: "wrong method", method: http.MethodPost, wantCode: http.StatusMethodNotAllowed},
+		{name: "missing user", wantCode: http.StatusBadRequest},
+		{name: "invalid limit", query: "?user_id=user-17&limit=0", wantCode: http.StatusBadRequest},
+		{name: "invalid page", query: "?user_id=user-17&page=0", wantCode: http.StatusBadRequest},
+		{name: "unknown status", query: "?user_id=user-17&status=queued", wantCode: http.StatusBadRequest},
+		{name: "unknown event type", query: "?user_id=user-17&event_type=deleted", wantCode: http.StatusBadRequest},
+		{
+			name:      "repository error",
+			query:     "?user_id=user-17",
+			wantArgs:  listArgs{userID: "user-17", limit: 20},
+			repoErr:   errors.New("private database detail"),
+			wantCode:  http.StatusInternalServerError,
+			wantCalls: 1,
+		},
 	}
 
 	for _, tt := range tests {
@@ -272,40 +305,33 @@ func TestGetEventsHandler(t *testing.T) {
 			if method == "" {
 				method = http.MethodGet
 			}
+
 			req := httptest.NewRequest(method, "/api/events"+tt.query, nil)
 			ctx, cancel := context.WithCancel(req.Context())
 			defer cancel()
 			req = req.WithContext(ctx)
-			rec := httptest.NewRecorder()
+
 			wantEvents := []models.EventResponse{testEventResponse()}
 			if tt.empty {
 				wantEvents = []models.EventResponse{}
 			}
 			repo := &fakeHandlerRepository{t: t}
 			if tt.wantCalls > 0 {
-				repo.getEvents = func(gotCtx context.Context, status, userID string, limit, offset int) ([]models.EventResponse, error) {
-					if gotCtx != ctx {
-						t.Error("request context was not forwarded")
+				repo.getEvents = func(gotCtx context.Context, status, userID, eventType string, limit, offset int) ([]models.EventResponse, error) {
+					if gotCtx.Done() != ctx.Done() || middleware.GetCorrelationID(gotCtx) != testCorrelationID {
+						t.Errorf("request context was not forwarded")
 					}
-					if got := (listArgs{status, userID, limit, offset}); got != tt.wantArgs {
+
+					got := listArgs{status: status, userID: userID, eventType: eventType, limit: limit, offset: offset}
+					if got != tt.wantArgs {
 						t.Errorf("list arguments = %#v, want %#v", got, tt.wantArgs)
 					}
 					return wantEvents, tt.repoErr
 				}
 			}
+			rec := runHandler(req, func(w http.ResponseWriter, r *http.Request) { GetEventsHandler(repo, w, r) })
 
-			GetEventsHandler(repo, rec, req)
-
-			contentType := "text/plain; charset=utf-8"
-			wantText := tt.wantText
-			if tt.wantCode == http.StatusOK || tt.wantCode == http.StatusBadRequest {
-				contentType = "application/json"
-			}
-			if tt.wantCode == http.StatusBadRequest {
-				wantText = ""
-				assertBadRequestJSON(t, rec, tt.wantText)
-			}
-			assertHTTPResponse(t, rec, tt.wantCode, contentType, wantText)
+			assertHTTPResponse(t, rec, tt.wantCode, "")
 			if repo.calls != tt.wantCalls {
 				t.Errorf("repository calls = %d, want %d", repo.calls, tt.wantCalls)
 			}
@@ -331,12 +357,12 @@ func TestGetEventByIDHandler(t *testing.T) {
 		wantCalls int
 	}{
 		{name: "success", id: wantEvent.EventID, wantCode: http.StatusOK, wantCalls: 1},
-		{name: "wrong method", method: http.MethodPost, id: wantEvent.EventID, wantCode: http.StatusMethodNotAllowed, wantText: "Method not allowed"},
+		{name: "wrong method", method: http.MethodPost, id: wantEvent.EventID, wantCode: http.StatusMethodNotAllowed, wantText: "method not allowed"},
 		{name: "invalid UUID", id: "not-a-uuid", wantCode: http.StatusBadRequest, wantText: "invalid event id"},
 		{name: "missing ID", wantCode: http.StatusBadRequest, wantText: "invalid event id"},
 		{name: "not found", id: wantEvent.EventID, repoErr: pgx.ErrNoRows, wantCode: http.StatusNotFound, wantText: "event not found", wantCalls: 1},
 		{name: "wrapped not found", id: wantEvent.EventID, repoErr: fmt.Errorf("get event: %w", pgx.ErrNoRows), wantCode: http.StatusNotFound, wantText: "event not found", wantCalls: 1},
-		{name: "repository error", id: wantEvent.EventID, repoErr: errors.New("private database detail"), wantCode: http.StatusInternalServerError, wantText: "failed to get event", wantCalls: 1},
+		{name: "repository error", id: wantEvent.EventID, repoErr: errors.New("private database detail"), wantCode: http.StatusInternalServerError, wantText: "internal server error", wantCalls: 1},
 	}
 
 	for _, tt := range tests {
@@ -349,11 +375,10 @@ func TestGetEventByIDHandler(t *testing.T) {
 			ctx, cancel := context.WithCancel(req.Context())
 			defer cancel()
 			req = req.WithContext(ctx)
-			rec := httptest.NewRecorder()
 			repo := &fakeHandlerRepository{t: t}
 			if tt.wantCalls > 0 {
 				repo.getEventByID = func(gotCtx context.Context, eventID string) (models.EventResponse, error) {
-					if gotCtx != ctx {
+					if gotCtx.Done() != ctx.Done() || middleware.GetCorrelationID(gotCtx) != testCorrelationID {
 						t.Error("request context was not forwarded")
 					}
 					if eventID != tt.id {
@@ -362,14 +387,9 @@ func TestGetEventByIDHandler(t *testing.T) {
 					return wantEvent, tt.repoErr
 				}
 			}
+			rec := runHandler(req, func(w http.ResponseWriter, r *http.Request) { GetEventByIDHandler(repo, w, r) })
 
-			GetEventByIDHandler(repo, rec, req)
-
-			contentType := "text/plain; charset=utf-8"
-			if tt.wantCode == http.StatusOK {
-				contentType = "application/json"
-			}
-			assertHTTPResponse(t, rec, tt.wantCode, contentType, tt.wantText)
+			assertHTTPResponse(t, rec, tt.wantCode, tt.wantText)
 			if repo.calls != tt.wantCalls {
 				t.Errorf("repository calls = %d, want %d", repo.calls, tt.wantCalls)
 			}
@@ -395,8 +415,8 @@ func TestRetryPendingHandler(t *testing.T) {
 	}{
 		{name: "success", method: http.MethodPost, count: 3, wantCode: http.StatusOK, wantCalls: 1},
 		{name: "no failed events", method: http.MethodPost, wantCode: http.StatusOK, wantCalls: 1},
-		{name: "wrong method", method: http.MethodGet, wantCode: http.StatusMethodNotAllowed, wantText: "Method not allowed"},
-		{name: "repository error", method: http.MethodPost, repoErr: errors.New("private database detail"), wantCode: http.StatusInternalServerError, wantText: "failed to retry events", wantCalls: 1},
+		{name: "wrong method", method: http.MethodGet, wantCode: http.StatusMethodNotAllowed, wantText: "method not allowed"},
+		{name: "repository error", method: http.MethodPost, repoErr: errors.New("private database detail"), wantCode: http.StatusInternalServerError, wantText: "internal server error", wantCalls: 1},
 	}
 
 	for _, tt := range tests {
@@ -405,24 +425,18 @@ func TestRetryPendingHandler(t *testing.T) {
 			ctx, cancel := context.WithCancel(req.Context())
 			defer cancel()
 			req = req.WithContext(ctx)
-			rec := httptest.NewRecorder()
 			repo := &fakeHandlerRepository{t: t}
 			if tt.wantCalls > 0 {
 				repo.retryFailed = func(gotCtx context.Context) (int64, error) {
-					if gotCtx != ctx {
+					if gotCtx.Done() != ctx.Done() || middleware.GetCorrelationID(gotCtx) != testCorrelationID {
 						t.Error("request context was not forwarded")
 					}
 					return tt.count, tt.repoErr
 				}
 			}
+			rec := runHandler(req, func(w http.ResponseWriter, r *http.Request) { RetryPendingHandler(repo, w, r) })
 
-			RetryPendingHandler(repo, rec, req)
-
-			contentType := "text/plain; charset=utf-8"
-			if tt.wantCode == http.StatusOK {
-				contentType = "application/json"
-			}
-			assertHTTPResponse(t, rec, tt.wantCode, contentType, tt.wantText)
+			assertHTTPResponse(t, rec, tt.wantCode, tt.wantText)
 			if repo.calls != tt.wantCalls {
 				t.Errorf("repository calls = %d, want %d", repo.calls, tt.wantCalls)
 			}

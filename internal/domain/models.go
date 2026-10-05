@@ -6,9 +6,9 @@ import (
 )
 
 type EventRequest struct {
-	UserID    string         `json:"user_id"`
-	OrderID   string         `json:"order_id"`
-	EventType string         `json:"event_type"`
+	UserID    string         `json:"user_id" validate:"required,max=64"`
+	OrderID   string         `json:"order_id" validate:"required,max=64"`
+	EventType string         `json:"event_type" validate:"required,oneof=created paid shipped"`
 	Payload   map[string]any `json:"payload"`
 }
 

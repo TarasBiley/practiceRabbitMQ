@@ -26,14 +26,24 @@ definitions:
   domain.EventRequest:
     properties:
       event_type:
+        enum:
+        - created
+        - paid
+        - shipped
         type: string
       order_id:
+        maxLength: 64
         type: string
       payload:
         additionalProperties: {}
         type: object
       user_id:
+        maxLength: 64
         type: string
+    required:
+    - event_type
+    - order_id
+    - user_id
     type: object
   domain.EventResponse:
     properties:
@@ -82,11 +92,11 @@ paths:
         "405":
           description: Method Not Allowed
           schema:
-            type: string
+            $ref: '#/definitions/domain.ErrorResponse'
         "500":
           description: Internal Server Error
           schema:
-            type: string
+            $ref: '#/definitions/domain.ErrorResponse'
       summary: Повторно поставить failed события в очередь
       tags:
       - admin
@@ -94,23 +104,29 @@ paths:
     get:
       description: Возвращает список событий с фильтрацией и пагинацией
       parameters:
+      - description: User ID
+        in: query
+        name: user_id
+        required: true
+        type: string
       - description: 'Фильтр по статусу: pending, sent, failed'
         in: query
         name: status
         type: string
-      - description: Фильтр по user_id
+      - description: 'Фильтр по типу события: created, paid, shipped'
         in: query
-        name: user_id
+        name: event_type
         type: string
-      - default: 10
-        description: Количество событий
+      - default: 1
+        description: Номер страницы
         in: query
-        name: limit
+        name: page
         type: integer
-      - default: 0
-        description: Смещение
+      - default: 20
+        description: Количество событий на странице
         in: query
-        name: offset
+        maximum: 100
+        name: limit
         type: integer
       produces:
       - application/json
@@ -125,10 +141,14 @@ paths:
           description: Bad Request
           schema:
             $ref: '#/definitions/domain.ErrorResponse'
+        "405":
+          description: Method Not Allowed
+          schema:
+            $ref: '#/definitions/domain.ErrorResponse'
         "500":
           description: Internal Server Error
           schema:
-            type: string
+            $ref: '#/definitions/domain.ErrorResponse'
       summary: Получить список событий
       tags:
       - events
@@ -154,10 +174,14 @@ paths:
           description: Bad Request
           schema:
             $ref: '#/definitions/domain.ErrorResponse'
+        "405":
+          description: Method Not Allowed
+          schema:
+            $ref: '#/definitions/domain.ErrorResponse'
         "500":
           description: Internal Server Error
           schema:
-            type: string
+            $ref: '#/definitions/domain.ErrorResponse'
       summary: Создать событие заказа
       tags:
       - events
@@ -180,15 +204,19 @@ paths:
         "400":
           description: Bad Request
           schema:
-            type: string
+            $ref: '#/definitions/domain.ErrorResponse'
         "404":
           description: Not Found
           schema:
-            type: string
+            $ref: '#/definitions/domain.ErrorResponse'
+        "405":
+          description: Method Not Allowed
+          schema:
+            $ref: '#/definitions/domain.ErrorResponse'
         "500":
           description: Internal Server Error
           schema:
-            type: string
+            $ref: '#/definitions/domain.ErrorResponse'
       summary: Получить событие по ID
       tags:
       - events

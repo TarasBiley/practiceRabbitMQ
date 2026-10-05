@@ -39,13 +39,13 @@ const docTemplate = `{
                     "405": {
                         "description": "Method Not Allowed",
                         "schema": {
-                            "type": "string"
+                            "$ref": "#/definitions/domain.ErrorResponse"
                         }
                     },
                     "500": {
                         "description": "Internal Server Error",
                         "schema": {
-                            "type": "string"
+                            "$ref": "#/definitions/domain.ErrorResponse"
                         }
                     }
                 }
@@ -64,28 +64,36 @@ const docTemplate = `{
                 "parameters": [
                     {
                         "type": "string",
+                        "description": "User ID",
+                        "name": "user_id",
+                        "in": "query",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
                         "description": "Фильтр по статусу: pending, sent, failed",
                         "name": "status",
                         "in": "query"
                     },
                     {
                         "type": "string",
-                        "description": "Фильтр по user_id",
-                        "name": "user_id",
+                        "description": "Фильтр по типу события: created, paid, shipped",
+                        "name": "event_type",
                         "in": "query"
                     },
                     {
                         "type": "integer",
-                        "default": 10,
-                        "description": "Количество событий",
+                        "default": 1,
+                        "description": "Номер страницы",
+                        "name": "page",
+                        "in": "query"
+                    },
+                    {
+                        "maximum": 100,
+                        "type": "integer",
+                        "default": 20,
+                        "description": "Количество событий на странице",
                         "name": "limit",
-                        "in": "query"
-                    },
-                    {
-                        "type": "integer",
-                        "default": 0,
-                        "description": "Смещение",
-                        "name": "offset",
                         "in": "query"
                     }
                 ],
@@ -105,10 +113,16 @@ const docTemplate = `{
                             "$ref": "#/definitions/domain.ErrorResponse"
                         }
                     },
+                    "405": {
+                        "description": "Method Not Allowed",
+                        "schema": {
+                            "$ref": "#/definitions/domain.ErrorResponse"
+                        }
+                    },
                     "500": {
                         "description": "Internal Server Error",
                         "schema": {
-                            "type": "string"
+                            "$ref": "#/definitions/domain.ErrorResponse"
                         }
                     }
                 }
@@ -149,10 +163,16 @@ const docTemplate = `{
                             "$ref": "#/definitions/domain.ErrorResponse"
                         }
                     },
+                    "405": {
+                        "description": "Method Not Allowed",
+                        "schema": {
+                            "$ref": "#/definitions/domain.ErrorResponse"
+                        }
+                    },
                     "500": {
                         "description": "Internal Server Error",
                         "schema": {
-                            "type": "string"
+                            "$ref": "#/definitions/domain.ErrorResponse"
                         }
                     }
                 }
@@ -187,19 +207,25 @@ const docTemplate = `{
                     "400": {
                         "description": "Bad Request",
                         "schema": {
-                            "type": "string"
+                            "$ref": "#/definitions/domain.ErrorResponse"
                         }
                     },
                     "404": {
                         "description": "Not Found",
                         "schema": {
-                            "type": "string"
+                            "$ref": "#/definitions/domain.ErrorResponse"
+                        }
+                    },
+                    "405": {
+                        "description": "Method Not Allowed",
+                        "schema": {
+                            "$ref": "#/definitions/domain.ErrorResponse"
                         }
                     },
                     "500": {
                         "description": "Internal Server Error",
                         "schema": {
-                            "type": "string"
+                            "$ref": "#/definitions/domain.ErrorResponse"
                         }
                     }
                 }
@@ -245,19 +271,31 @@ const docTemplate = `{
         },
         "domain.EventRequest": {
             "type": "object",
+            "required": [
+                "event_type",
+                "order_id",
+                "user_id"
+            ],
             "properties": {
                 "event_type": {
-                    "type": "string"
+                    "type": "string",
+                    "enum": [
+                        "created",
+                        "paid",
+                        "shipped"
+                    ]
                 },
                 "order_id": {
-                    "type": "string"
+                    "type": "string",
+                    "maxLength": 64
                 },
                 "payload": {
                     "type": "object",
                     "additionalProperties": {}
                 },
                 "user_id": {
-                    "type": "string"
+                    "type": "string",
+                    "maxLength": 64
                 }
             }
         },

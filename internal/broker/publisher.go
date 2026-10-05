@@ -3,7 +3,7 @@ package broker
 import (
 	"context"
 	"encoding/json"
-	"fmt"
+	"log/slog"
 	"practiceRabbitMQ/internal/service"
 	"time"
 
@@ -27,7 +27,10 @@ func publishPendingEvent(
 	rabbitChannel MessagePublisher,
 ) error {
 
-	events, err := service.PublishPendingEventService(ctx, repo)
+	events, err := service.PublishPendingEventService(
+		ctx,
+		repo,
+	)
 
 	if err != nil {
 		return err
@@ -35,8 +38,18 @@ func publishPendingEvent(
 
 	for _, event := range events {
 
+		logger := slog.With(
+			"correlation_id", event.CorrelationID,
+			"event_id", event.EventID,
+		)
+
 		body, err := json.Marshal(event)
 		if err != nil {
+			logger.Error(
+				"failed to marshal event",
+				"error", err,
+			)
+
 			return err
 		}
 
@@ -53,10 +66,17 @@ func publishPendingEvent(
 				Body:          body,
 			},
 		)
+
 		if err != nil {
+			logger.Error(
+				"failed to publish event",
+				"error", err,
+			)
+
 			return err
 		}
-		fmt.Println("published event:", event.EventID)
+
+		logger.Info("event published")
 	}
 
 	return nil
@@ -67,13 +87,25 @@ func startPublisher(
 	repo service.PendingEventReader,
 	rabbitChannel MessagePublisher,
 ) <-chan struct{} {
+
 	done := make(chan struct{})
+
 	go func() {
 		defer close(done)
-		ticker := time.NewTicker(30 * time.Second)
+
+		ticker := time.NewTicker(
+			30 * time.Second,
+		)
 		defer ticker.Stop()
-		runPublisher(ctx, repo, rabbitChannel, ticker.C)
+
+		runPublisher(
+			ctx,
+			repo,
+			rabbitChannel,
+			ticker.C,
+		)
 	}()
+
 	return done
 }
 
@@ -83,17 +115,29 @@ func runPublisher(
 	rabbitChannel MessagePublisher,
 	ticks <-chan time.Time,
 ) {
+
 	for {
 		select {
+
 		case _, ok := <-ticks:
 			if !ok || ctx.Err() != nil {
 				return
 			}
-			if err := publishPendingEvent(ctx, repo, rabbitChannel); err != nil {
-				fmt.Println("publisher error:", err)
+
+			if err := publishPendingEvent(
+				ctx,
+				repo,
+				rabbitChannel,
+			); err != nil {
+
+				slog.Error(
+					"publisher error",
+					"error", err,
+				)
 			}
+
 		case <-ctx.Done():
-			fmt.Println("publisher stopped")
+			slog.Info("publisher stopped")
 			return
 		}
 	}

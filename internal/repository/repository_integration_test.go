@@ -156,46 +156,155 @@ func TestRepositoryCreateEventDuplicateID(t *testing.T) {
 
 func TestRepositoryGetEvents(t *testing.T) {
 	repo, pool := newTestRepository(t)
+
 	first, _ := createTestEvent(t, repo, "user-1", "order-1")
 	second, _ := createTestEvent(t, repo, "user-1", "order-2")
 	third, _ := createTestEvent(t, repo, "user-2", "order-3")
 	fourth, _ := createTestEvent(t, repo, "user-1", "order-4")
+
 	baseTime := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+
 	for i, id := range []string{first, second, third, fourth} {
-		execTestSQL(t, pool, "UPDATE events SET created_at = $2 WHERE event_id = $1", id, baseTime.Add(time.Duration(i)*time.Hour))
+		execTestSQL(
+			t,
+			pool,
+			"UPDATE events SET created_at = $2 WHERE event_id = $1",
+			id,
+			baseTime.Add(time.Duration(i)*time.Hour),
+		)
 	}
-	execTestSQL(t, pool, "UPDATE events SET status = 'sent' WHERE event_id IN ($1, $2, $3)", second, third, fourth)
+
+	execTestSQL(
+		t,
+		pool,
+		"UPDATE events SET status = 'sent' WHERE event_id IN ($1, $2, $3)",
+		second,
+		third,
+		fourth,
+	)
+
+	// Сделаем fourth другим типом, чтобы реально проверить event_type.
+	execTestSQL(
+		t,
+		pool,
+		"UPDATE events SET event_type = 'shipped' WHERE event_id = $1",
+		fourth,
+	)
 
 	cases := []struct {
-		name, status, userID string
-		limit, offset        int
-		want                 []string
+		name      string
+		status    string
+		userID    string
+		eventType string
+		limit     int
+		offset    int
+		want      []string
 	}{
-		{name: "status and user", status: "sent", userID: "user-1", limit: 10, want: []string{fourth, second}},
-		{name: "status only", status: "sent", limit: 10, want: []string{fourth, third, second}},
-		{name: "user only", userID: "user-1", limit: 10, want: []string{fourth, second, first}},
-		{name: "no filters", limit: 10, want: []string{fourth, third, second, first}},
-		{name: "page with both filters", status: "sent", userID: "user-1", limit: 1, offset: 1, want: []string{second}},
-		{name: "page with status", status: "sent", limit: 1, offset: 1, want: []string{third}},
-		{name: "page with user", userID: "user-1", limit: 1, offset: 1, want: []string{second}},
-		{name: "page without filters", limit: 2, offset: 1, want: []string{third, second}},
-		{name: "no matching status", status: "failed", limit: 10},
-		{name: "no matching user", userID: "unknown", limit: 10},
-		{name: "offset past end", limit: 10, offset: 4},
-		{name: "zero limit", limit: 0},
+		{
+			name:   "user only",
+			userID: "user-1",
+			limit:  10,
+			want:   []string{fourth, second, first},
+		},
+		{
+			name:   "status and user",
+			status: "sent",
+			userID: "user-1",
+			limit:  10,
+			want:   []string{fourth, second},
+		},
+		{
+			name:      "paid events",
+			userID:    "user-1",
+			eventType: "paid",
+			limit:     10,
+			want:      []string{second, first},
+		},
+		{
+			name:      "shipped events",
+			userID:    "user-1",
+			eventType: "shipped",
+			limit:     10,
+			want:      []string{fourth},
+		},
+		{
+			name:      "status user and event type",
+			status:    "sent",
+			userID:    "user-1",
+			eventType: "paid",
+			limit:     10,
+			want:      []string{second},
+		},
+		{
+			name:   "different user",
+			status: "sent",
+			userID: "user-2",
+			limit:  10,
+			want:   []string{third},
+		},
+		{
+			name:   "pagination",
+			userID: "user-1",
+			limit:  1,
+			offset: 1,
+			want:   []string{second},
+		},
+		{
+			name:   "no matching status",
+			status: "failed",
+			userID: "user-1",
+			limit:  10,
+		},
+		{
+			name:      "no matching event type",
+			userID:    "user-1",
+			eventType: "created",
+			limit:     10,
+		},
+		{
+			name:   "no matching user",
+			userID: "unknown",
+			limit:  10,
+		},
+		{
+			name:   "offset past end",
+			userID: "user-1",
+			limit:  10,
+			offset: 3,
+		},
+		{
+			name:   "zero limit",
+			userID: "user-1",
+			limit:  0,
+		},
 	}
+
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			events, err := repo.GetEvents(repositoryTestContext(t), tc.status, tc.userID, tc.limit, tc.offset)
+			events, err := repo.GetEvents(
+				repositoryTestContext(t),
+				tc.status,
+				tc.userID,
+				tc.eventType,
+				tc.limit,
+				tc.offset,
+			)
 			if err != nil {
 				t.Fatalf("GetEvents: %v", err)
 			}
+
 			got := make([]string, len(events))
+
 			for i, event := range events {
 				got[i] = event.EventID
 			}
+
 			if !slices.Equal(got, tc.want) {
-				t.Errorf("event IDs in order: got %v, want %v", got, tc.want)
+				t.Errorf(
+					"event IDs in order: got %v, want %v",
+					got,
+					tc.want,
+				)
 			}
 		})
 	}
